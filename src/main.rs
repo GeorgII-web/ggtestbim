@@ -38,7 +38,7 @@ fn main() {
             hud::HudPlugin,
         ))
         // Sharp shadows near the player: a bigger shadow map split into cascades that are dense up close.
-        .insert_resource(DirectionalLightShadowMap { size: 4096 })
+        .insert_resource(DirectionalLightShadowMap { size: 2048 })
         .add_systems(Startup, setup)
         .run();
 }
@@ -52,9 +52,9 @@ fn setup(mut commands: Commands) {
         },
         Transform::from_xyz(30.0, 60.0, 20.0).looking_at(Vec3::ZERO, Vec3::Y),
         CascadeShadowConfigBuilder {
-            num_cascades: 4,
+            num_cascades: 3,
             first_cascade_far_bound: 12.0,
-            maximum_distance: 160.0,
+            maximum_distance: 90.0,
             ..default()
         }
         .build(),

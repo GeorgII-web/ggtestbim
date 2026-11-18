@@ -1,5 +1,5 @@
 //! Compass at the top center: a strip of 15 degree ticks with N/E/S/W around the view direction, a marker
-//! under the middle and the heading in degrees. North is -z, headings grow clockwise.
+//! under the middle, the heading in degrees and the frame rate. North is -z, headings grow clockwise.
 
 use bevy::prelude::*;
 
@@ -43,7 +43,15 @@ fn setup_compass(mut commands: Commands) {
         });
 }
 
-fn compass(camera: Single<&Transform, With<Player>>, mut text: Single<&mut Text, With<Compass>>) {
+fn compass(
+    time: Res<Time>,
+    mut fps: Local<f32>,
+    camera: Single<&Transform, With<Player>>,
+    mut text: Single<&mut Text, With<Compass>>,
+) {
+    // Frames per second, smoothed over about half a second.
+    let dt = time.delta_secs().max(1e-4);
+    *fps += (1.0 / dt - *fps) * (dt * 2.0).min(1.0);
     let f = camera.forward();
     let heading = f.x.atan2(-f.z).to_degrees().rem_euclid(360.0);
     let base = (heading / TICK_DEG as f32).round() as i32 * TICK_DEG;
@@ -62,5 +70,11 @@ fn compass(camera: Single<&Transform, With<Player>>, mut text: Single<&mut Text,
         "  ".repeat(HALF as usize),
         "  ".repeat(HALF as usize)
     );
-    text.0 = format!("{}\n{}\n{:03.0}", strip.join(" "), marker, heading);
+    text.0 = format!(
+        "{}\n{}\n{:03.0}\n{:.0} fps",
+        strip.join(" "),
+        marker,
+        heading,
+        *fps
+    );
 }

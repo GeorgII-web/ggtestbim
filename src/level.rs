@@ -81,8 +81,8 @@ impl Level {
 /// chunks generated per frame while walking (the first load at startup has no limit).
 pub(crate) const CHUNK: i32 = 2;
 pub(crate) const CHUNK_SIZE: f32 = CHUNK as f32 * PITCH;
-const LOAD_RADIUS: i32 = 3;
-const LOADS_PER_FRAME: usize = 2;
+const LOAD_RADIUS: i32 = 2;
+const LOADS_PER_FRAME: usize = 1;
 
 /// Random seed from the clock: every start is a different world.
 fn world_seed() -> u64 {

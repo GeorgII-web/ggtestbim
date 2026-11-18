@@ -25,10 +25,12 @@ const CRAWL: f32 = 2.2;
 /// air control.
 const ACCEL: f32 = 200.0;
 const BRAKE: f32 = 200.0;
-const AIR_ACCEL: f32 = 30.0;
-/// Jump apex 1.4 m: a crouched body lifts its feet over a 1.0 m window sill.
-const JUMP: f32 = 7.5;
-const GRAVITY: f32 = 20.0;
+/// Little air control: a jump keeps the speed it took off with.
+const AIR_ACCEL: f32 = 4.0;
+/// Short, heavy jump: apex 0.7 m, about 0.43 s in the air. Enough for a crouched body to reach a 1.0 m
+/// window sill with the air step-up (feet above sill - STEP).
+const JUMP: f32 = 6.5;
+const GRAVITY: f32 = 30.0;
 /// A jump still works this long after leaving the ground (coyote time), and a press this long before
 /// landing is kept until the landing (jump buffer); jumping while running at full speed stays reliable.
 const JUMP_GRACE: f32 = 0.12;
@@ -81,8 +83,8 @@ fn spawn_player(mut commands: Commands) {
         DistanceFog {
             color: Color::srgb(0.62, 0.77, 0.93),
             falloff: FogFalloff::Linear {
-                start: 70.0,
-                end: 170.0,
+                start: 45.0,
+                end: 115.0,
             },
             ..default()
         },
@@ -159,9 +161,23 @@ fn walk(
     if !level.loaded(p.pos) {
         return;
     }
-    let mut near = level.near(p.pos);
-    near.push(&cars.0);
-    near.push(&props.0);
+    // One pass over the nearby chunks, cars and props keeps only the boxes this frame's move can touch;
+    // the substeps then test a few dozen boxes instead of tens of thousands.
+    let reach = {
+        let span = p.vel.abs() * dt + Vec3::splat(2.0);
+        Aabb {
+            min: p.pos - Vec3::new(RADIUS, 0.0, RADIUS) - span,
+            max: p.pos + Vec3::new(RADIUS, STAND, RADIUS) + span,
+        }
+    };
+    let mut sources = level.near(p.pos);
+    sources.push(&cars.0);
+    sources.push(&props.0);
+    let local: Vec<Aabb> = boxes(&sources)
+        .filter(|b| overlap(&reach, b))
+        .copied()
+        .collect();
+    let near = [&local[..]];
 
     let crouch_key = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
     // Crouching starts only on the ground (Ctrl in the air does nothing); a crouch begun on the ground holds
@@ -431,5 +447,25 @@ mod tests {
             "at {:?}",
             p.pos
         );
+    }
+
+    /// Crouched, jump at a window (sill 1.0 m, top 2.3 m, wall 0.3 m) and walk on: through it.
+    #[test]
+    fn crouch_jumps_through_a_window() {
+        let b = |min: Vec3, max: Vec3| Aabb { min, max };
+        let boxes = [
+            b(Vec3::new(-10.0, -1.0, -10.0), Vec3::new(10.0, 0.0, 10.0)),
+            b(Vec3::new(0.0, 0.0, -5.0), Vec3::new(0.3, 1.0, 5.0)),
+            b(Vec3::new(0.0, 2.3, -5.0), Vec3::new(0.3, 3.5, 5.0)),
+            b(Vec3::new(0.0, 1.0, -5.0), Vec3::new(0.3, 2.3, -0.6)),
+            b(Vec3::new(0.0, 1.0, 0.6), Vec3::new(0.3, 2.3, 5.0)),
+        ];
+        let near = [&boxes[..]];
+        let mut p = player_at(Vec3::new(-0.6, 0.0, 0.0));
+        p.height = CROUCH;
+        p.vel.y = JUMP;
+        p.grounded = false;
+        walk_to(&mut p, &near, Vec2::new(2.0, 0.0), 3.0);
+        assert!(p.pos.x > 1.5, "stuck at {:?}", p.pos);
     }
 }
