@@ -35,7 +35,7 @@ const JUMP_GRACE: f32 = 0.12;
 const MAX_FALL: f32 = 50.0;
 /// Highest ledge stepped onto without jumping (a stair step is 0.25).
 const STEP: f32 = 0.55;
-const SENSITIVITY: f32 = 0.0025;
+const SENSITIVITY: f32 = 0.00083;
 /// Longest move per collision substep, below the thinnest slab (0.2) to avoid tunneling.
 const MAX_SUBSTEP: f32 = 0.15;
 const SPAWN: Vec3 = Vec3::new(0.0, 0.5, 0.0);
