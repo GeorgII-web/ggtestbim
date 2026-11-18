@@ -17,15 +17,19 @@ pub struct LevelPlugin;
 
 impl Plugin for LevelPlugin {
     fn build(&self, app: &mut App) {
-        let seed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(1, |d| d.as_nanos() as u64);
+        let seed = world_seed();
         app.insert_resource(Level {
             chunks: HashMap::new(),
             rng: Rng(seed),
+            new_chunks: Vec::new(),
+            new_spots: Vec::new(),
         })
+        .insert_resource(PropBoxes(Vec::new()))
         .add_systems(Startup, (setup_palette, initial_load).chain())
-        .add_systems(Update, (regenerate, stream_chunks).chain());
+        .add_systems(
+            Update,
+            ((regenerate, stream_chunks).chain(), prop_boxes, haunt),
+        );
     }
 }
 
@@ -40,7 +44,11 @@ pub struct Aabb {
 #[derive(Resource)]
 pub struct Level {
     chunks: HashMap<IVec2, Chunk>,
-    rng: Rng,
+    pub(crate) rng: Rng,
+    /// Chunks generated since the cars module last took them, to put cars on their streets.
+    pub(crate) new_chunks: Vec<IVec2>,
+    /// Watcher spots of the chunks generated since the watchers module last took them.
+    pub(crate) new_spots: Vec<Vec<Vec3>>,
 }
 
 struct Chunk {
@@ -63,7 +71,7 @@ impl Level {
         v
     }
 
-    /// Whether the ground under `p` exists yet (the player waits for it).
+    /// Whether the ground under `p` exists yet (the player waits for it, cars outside it are removed).
     pub fn loaded(&self, p: Vec3) -> bool {
         self.chunks.contains_key(&chunk_of(p))
     }
@@ -71,10 +79,17 @@ impl Level {
 
 /// Blocks per chunk side, chunk size in meters, chunks kept loaded around the player (square radius),
 /// chunks generated per frame while walking (the first load at startup has no limit).
-const CHUNK: i32 = 2;
-const CHUNK_SIZE: f32 = CHUNK as f32 * PITCH;
+pub(crate) const CHUNK: i32 = 2;
+pub(crate) const CHUNK_SIZE: f32 = CHUNK as f32 * PITCH;
 const LOAD_RADIUS: i32 = 3;
 const LOADS_PER_FRAME: usize = 2;
+
+/// Random seed from the clock: every start is a different world.
+fn world_seed() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(1, |d| d.as_nanos() as u64)
+}
 
 fn chunk_of(p: Vec3) -> IVec2 {
     IVec2::new(
@@ -88,14 +103,16 @@ struct LevelPart;
 
 /// Block size and pitch (block + street); streets run along x, z = k * PITCH, so (0, 0) is a crossing.
 const BLOCK: f32 = 22.0;
-const PITCH: f32 = 30.0;
+pub(crate) const PITCH: f32 = 30.0;
 const STREET: f32 = PITCH - BLOCK;
 /// Story height, outer wall thickness, stair step rise and run.
-const FH: f32 = 3.5;
-const T: f32 = 0.3;
+pub(crate) const FH: f32 = 3.5;
+pub(crate) const T: f32 = 0.3;
 const RISE: f32 = 0.25;
 const RUN: f32 = 0.3;
 const TERRACE: f32 = 1.5;
+/// Width of one stair lane (a stairwell has two).
+pub(crate) const LANE: f32 = 1.4;
 /// Largest height difference a passage can bridge with stairs over one street (steps of at least 0.28 m).
 const MAX_PASSAGE_RISE: f32 = 7.0;
 
@@ -104,7 +121,6 @@ enum Mat {
     Asphalt,
     Paving,
     Grass,
-    Floor,
     Stair,
     Trunk,
     Leaves,
@@ -112,11 +128,15 @@ enum Mat {
     Stone,
     Interior,
     Metal,
+    /// Random per world: floor and outer wall styles (texture kind, pattern seed, color, tile size).
+    Floor(u8),
     Wall(u8),
 }
 
-const WALL_COLORS: u8 = 5;
-const MATS: usize = 11 + WALL_COLORS as usize;
+const FIXED: usize = 10;
+const FLOORS: u8 = 4;
+const WALLS: u8 = 16;
+const MATS: usize = FIXED + FLOORS as usize + WALLS as usize;
 
 impl Mat {
     fn index(self) -> usize {
@@ -124,87 +144,125 @@ impl Mat {
             Mat::Asphalt => 0,
             Mat::Paving => 1,
             Mat::Grass => 2,
-            Mat::Floor => 3,
-            Mat::Stair => 4,
-            Mat::Trunk => 5,
-            Mat::Leaves => 6,
-            Mat::Water => 7,
-            Mat::Stone => 8,
-            Mat::Interior => 9,
-            Mat::Metal => 10,
-            Mat::Wall(i) => 11 + i as usize,
+            Mat::Stair => 3,
+            Mat::Trunk => 4,
+            Mat::Leaves => 5,
+            Mat::Water => 6,
+            Mat::Stone => 7,
+            Mat::Interior => 8,
+            Mat::Metal => 9,
+            Mat::Floor(i) => FIXED + i as usize,
+            Mat::Wall(i) => FIXED + FLOORS as usize + i as usize,
         }
     }
+}
 
-    fn from_index(i: usize) -> Mat {
-        [
-            Mat::Asphalt,
-            Mat::Paving,
-            Mat::Grass,
-            Mat::Floor,
-            Mat::Stair,
-            Mat::Trunk,
-            Mat::Leaves,
-            Mat::Water,
-            Mat::Stone,
-            Mat::Interior,
-            Mat::Metal,
-        ]
-        .get(i)
-        .copied()
-        .unwrap_or_else(|| Mat::Wall((i - 11) as u8))
-    }
-
-    /// Color tint, texture, texture tile size in meters, roughness.
-    fn look(self) -> ([f32; 3], Tex, f32, f32) {
-        match self {
-            Mat::Asphalt => ([0.34, 0.34, 0.36], Tex::Asphalt, 4.0, 0.95),
-            Mat::Paving => ([0.78, 0.74, 0.68], Tex::Tiles, 4.0, 0.85),
-            Mat::Grass => ([0.38, 0.62, 0.3], Tex::Grass, 3.0, 0.95),
-            Mat::Floor => ([0.72, 0.52, 0.34], Tex::Wood, 3.0, 0.6),
-            Mat::Stair => ([0.72, 0.72, 0.72], Tex::Concrete, 2.0, 0.9),
-            Mat::Trunk => ([0.45, 0.3, 0.18], Tex::Bark, 1.0, 0.95),
-            Mat::Leaves => ([0.32, 0.56, 0.26], Tex::Leaves, 2.0, 0.9),
-            Mat::Water => ([0.3, 0.52, 0.82], Tex::Water, 3.0, 0.08),
-            Mat::Stone => ([0.78, 0.75, 0.7], Tex::Stone, 4.0, 0.9),
-            Mat::Interior => ([0.93, 0.9, 0.84], Tex::Plaster, 4.0, 0.9),
-            Mat::Metal => ([0.3, 0.3, 0.33], Tex::Concrete, 2.0, 0.4),
-            Mat::Wall(0) => ([0.9, 0.84, 0.7], Tex::Plaster, 4.0, 0.9),
-            Mat::Wall(1) => ([0.75, 0.38, 0.3], Tex::Brick, 2.0, 0.9),
-            Mat::Wall(2) => ([0.94, 0.94, 0.92], Tex::Plaster, 4.0, 0.9),
-            Mat::Wall(3) => ([0.6, 0.68, 0.78], Tex::Plaster, 4.0, 0.9),
-            Mat::Wall(_) => ([0.86, 0.72, 0.5], Tex::Brick, 2.0, 0.9),
-        }
-    }
+/// Fixed materials by index: color tint, texture, texture tile size in meters, roughness.
+fn fixed_look(i: usize) -> ([f32; 3], Tex, f32, f32) {
+    [
+        ([0.34, 0.34, 0.36], Tex::Asphalt, 4.0, 0.95),
+        ([0.78, 0.74, 0.68], Tex::Tiles, 4.0, 0.85),
+        ([0.38, 0.62, 0.3], Tex::Grass, 3.0, 0.95),
+        ([0.72, 0.72, 0.72], Tex::Concrete, 2.0, 0.9),
+        ([0.45, 0.3, 0.18], Tex::Bark, 1.0, 0.95),
+        ([0.32, 0.56, 0.26], Tex::Leaves, 2.0, 0.9),
+        ([0.3, 0.52, 0.82], Tex::Water, 3.0, 0.08),
+        ([0.78, 0.75, 0.7], Tex::Stone, 4.0, 0.9),
+        ([0.93, 0.9, 0.84], Tex::Plaster, 4.0, 0.9),
+        ([0.3, 0.3, 0.33], Tex::Concrete, 2.0, 0.4),
+    ][i]
 }
 
 #[derive(Resource)]
 struct Palette {
     mats: Vec<Handle<StandardMaterial>>,
+    /// Texture tile size in meters per material index.
+    scales: Vec<f32>,
+    /// Unit cube for props, scaled per part.
+    cube: Handle<Mesh>,
+    /// Odd colors a prop can turn into behind the player's back.
+    crazy: Vec<Handle<StandardMaterial>>,
 }
 
 fn setup_palette(
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
+    mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    let mut textures: HashMap<Tex, Handle<Image>> = HashMap::new();
-    let mats = (0..MATS)
-        .map(|i| {
-            let (c, tex, _, roughness) = Mat::from_index(i).look();
-            let image = textures
-                .entry(tex)
-                .or_insert_with(|| images.add(textures::image(tex)))
-                .clone();
-            materials.add(StandardMaterial {
-                base_color: Color::srgb(c[0], c[1], c[2]),
-                base_color_texture: Some(image),
-                perceptual_roughness: roughness,
-                ..default()
-            })
+    let mut textures: HashMap<(Tex, u32), Handle<Image>> = HashMap::new();
+    let mut texture = |tex: Tex, seed: u32| {
+        textures
+            .entry((tex, seed))
+            .or_insert_with(|| images.add(textures::image(tex, seed)))
+            .clone()
+    };
+    let mut rng = Rng(world_seed() ^ 0xA5A5);
+    let mut mats = Vec::with_capacity(MATS);
+    let mut scales = Vec::with_capacity(MATS);
+    for i in 0..MATS {
+        let (color, tex, seed, scale, roughness) = if i < FIXED {
+            let (c, tex, scale, roughness) = fixed_look(i);
+            (Color::srgb(c[0], c[1], c[2]), tex, 0, scale, roughness)
+        } else {
+            let floor = i < FIXED + FLOORS as usize;
+            let kinds: &[Tex] = if floor {
+                &textures::FLOOR_KINDS
+            } else {
+                &textures::WALL_KINDS
+            };
+            let tex = kinds[rng.below(kinds.len() as u32) as usize];
+            let color = Color::hsl(
+                rng.range(0.0, 360.0),
+                rng.range(0.1, 0.6),
+                rng.range(0.45, 0.8),
+            );
+            let scale = if floor {
+                rng.range(2.0, 4.0)
+            } else {
+                rng.range(2.0, 6.0)
+            };
+            (
+                color,
+                tex,
+                1 + rng.below(1 << 20),
+                scale,
+                rng.range(0.5, 0.95),
+            )
+        };
+        mats.push(materials.add(StandardMaterial {
+            base_color: color,
+            base_color_texture: Some(texture(tex, seed)),
+            perceptual_roughness: roughness,
+            ..default()
+        }));
+        scales.push(scale);
+    }
+    let leaves = texture(Tex::Leaves, 0);
+    let crazy = [
+        (0.85, 0.2, 0.15),
+        (0.55, 0.25, 0.75),
+        (0.95, 0.75, 0.15),
+        (0.2, 0.8, 0.85),
+        (0.95, 0.45, 0.7),
+        (0.95, 0.95, 0.95),
+    ]
+    .iter()
+    .map(|&(r, g, b)| {
+        materials.add(StandardMaterial {
+            base_color: Color::srgb(r, g, b),
+            base_color_texture: Some(leaves.clone()),
+            perceptual_roughness: 0.9,
+            ..default()
         })
-        .collect();
-    commands.insert_resource(Palette { mats });
+    })
+    .collect();
+    commands.insert_resource(Palette {
+        mats,
+        scales,
+        cube: meshes.add(Cuboid::new(1.0, 1.0, 1.0)),
+        crazy,
+    });
 }
 
 fn initial_load(
@@ -271,17 +329,17 @@ fn stream(
     missing.sort_by_key(|&c| (c - center).length_squared());
     for c in missing.into_iter().take(max_loads) {
         let seed = level.rng.next();
-        let parts = generate(seed, c);
+        let (parts, props, spots) = generate(seed, c);
         let mut groups: Vec<Vec<Aabb>> = vec![Vec::new(); MATS];
         for (b, mat) in &parts {
             groups[mat.index()].push(*b);
         }
-        let entities = groups
+        let mut entities: Vec<Entity> = groups
             .iter()
             .enumerate()
             .filter(|(_, boxes)| !boxes.is_empty())
             .map(|(i, boxes)| {
-                let scale = Mat::from_index(i).look().2;
+                let scale = palette.scales[i];
                 commands
                     .spawn((
                         Mesh3d(meshes.add(box_mesh(boxes, scale))),
@@ -291,8 +349,40 @@ fn stream(
                     .id()
             })
             .collect();
+        for prop in props {
+            let children: Vec<Entity> = prop
+                .parts
+                .iter()
+                .map(|(b, mat)| {
+                    commands
+                        .spawn((
+                            Mesh3d(palette.cube.clone()),
+                            MeshMaterial3d(palette.mats[mat.index()].clone()),
+                            Transform::from_translation((b.min + b.max) / 2.0)
+                                .with_scale(b.max - b.min),
+                        ))
+                        .id()
+                })
+                .collect();
+            let boxes = prop.parts.iter().map(|(b, _)| *b).collect();
+            let root = commands
+                .spawn((
+                    Transform::from_translation(prop.base),
+                    Visibility::default(),
+                    PropState {
+                        boxes,
+                        children: children.clone(),
+                    },
+                    LevelPart,
+                ))
+                .add_children(&children)
+                .id();
+            entities.push(root);
+        }
         let boxes = parts.into_iter().map(|(b, _)| b).collect();
         level.chunks.insert(c, Chunk { boxes, entities });
+        level.new_chunks.push(c);
+        level.new_spots.push(spots);
     }
 }
 
@@ -321,6 +411,87 @@ fn regenerate(
         Vec3::ZERO,
         usize::MAX,
     );
+}
+
+#[derive(Component)]
+pub(crate) struct PropState {
+    /// Part boxes relative to the prop origin, before its transform.
+    boxes: Vec<Aabb>,
+    children: Vec<Entity>,
+}
+
+/// World boxes of the props near the player, rebuilt every frame (props move and change size).
+#[derive(Resource)]
+pub struct PropBoxes(pub Vec<Aabb>);
+
+pub(crate) fn prop_boxes(
+    props: Query<(&PropState, &Transform)>,
+    player: Single<&Transform, With<Player>>,
+    mut out: ResMut<PropBoxes>,
+) {
+    out.0.clear();
+    for (prop, tf) in &props {
+        if tf.translation.distance_squared(player.translation) > 15.0 * 15.0 {
+            continue;
+        }
+        for b in &prop.boxes {
+            let corners = (0..8).map(|i| {
+                let c = Vec3::new(
+                    if i & 1 == 0 { b.min.x } else { b.max.x },
+                    if i & 2 == 0 { b.min.y } else { b.max.y },
+                    if i & 4 == 0 { b.min.z } else { b.max.z },
+                );
+                tf.transform_point(c)
+            });
+            let (min, max) =
+                corners.fold((Vec3::MAX, Vec3::MIN), |(lo, hi), c| (lo.min(c), hi.max(c)));
+            out.0.push(Aabb { min, max });
+        }
+    }
+}
+
+/// Every 1.5 s each prop behind the player (more than 100° from the view direction, 5 to 70 m away) has
+/// a 4 % chance to change: grow or shrink, stretch, turn, or take an odd color.
+fn haunt(
+    time: Res<Time>,
+    mut clock: Local<f32>,
+    camera: Single<&Transform, With<Player>>,
+    mut props: Query<(&mut Transform, &PropState), Without<Player>>,
+    mut materials: Query<&mut MeshMaterial3d<StandardMaterial>>,
+    palette: Res<Palette>,
+    mut level: ResMut<Level>,
+) {
+    *clock += time.delta_secs();
+    if *clock < 1.5 {
+        return;
+    }
+    *clock = 0.0;
+    let forward = camera.forward().as_vec3();
+    for (mut tf, prop) in &mut props {
+        let to = tf.translation - camera.translation;
+        let dist = to.length();
+        if !(5.0..70.0).contains(&dist)
+            || to.normalize().dot(forward) > -0.17
+            || !level.rng.chance(0.04)
+        {
+            continue;
+        }
+        let rng = &mut level.rng;
+        match rng.below(4) {
+            0 => {
+                tf.scale =
+                    (tf.scale * rng.range(0.5, 1.6)).clamp(Vec3::splat(0.3), Vec3::splat(3.0))
+            }
+            1 => tf.scale.y = (tf.scale.y * rng.range(0.5, 1.8)).clamp(0.3, 3.0),
+            2 => tf.rotate_y(rng.range(0.5, 2.5)),
+            _ => {
+                let child = prop.children[rng.below(prop.children.len() as u32) as usize];
+                if let Ok(mut m) = materials.get_mut(child) {
+                    m.0 = palette.crazy[rng.below(palette.crazy.len() as u32) as usize].clone();
+                }
+            }
+        }
+    }
 }
 
 /// All boxes of one material as a single mesh; UVs are world coordinates divided by the texture tile size.
@@ -371,26 +542,26 @@ fn box_mesh(boxes: &[Aabb], scale: f32) -> Mesh {
 }
 
 /// SplitMix64: small, seedable, no dependency.
-struct Rng(u64);
+pub(crate) struct Rng(pub(crate) u64);
 
 impl Rng {
-    fn next(&mut self) -> u64 {
+    pub(crate) fn next(&mut self) -> u64 {
         self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
         let mut z = self.0;
         z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
         z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
         z ^ (z >> 31)
     }
-    fn unit(&mut self) -> f32 {
+    pub(crate) fn unit(&mut self) -> f32 {
         (self.next() >> 40) as f32 / (1u64 << 24) as f32
     }
-    fn range(&mut self, a: f32, b: f32) -> f32 {
+    pub(crate) fn range(&mut self, a: f32, b: f32) -> f32 {
         if b <= a { a } else { a + (b - a) * self.unit() }
     }
-    fn below(&mut self, n: u32) -> u32 {
+    pub(crate) fn below(&mut self, n: u32) -> u32 {
         (self.next() % n as u64) as u32
     }
-    fn chance(&mut self, p: f32) -> bool {
+    pub(crate) fn chance(&mut self, p: f32) -> bool {
         self.unit() < p
     }
 }
@@ -428,6 +599,7 @@ struct Building {
     z1: f32,
     floors: u32,
     wall: Mat,
+    floor: Mat,
     /// Interior walls: along z at `xm`, along x at `zm`.
     xm: f32,
     zm: f32,
@@ -463,6 +635,16 @@ struct Passage {
 struct Builder {
     rng: Rng,
     parts: Vec<(Aabb, Mat)>,
+    props: Vec<Prop>,
+    /// Places behind upper-floor windows where a watcher can stand (feet position).
+    spots: Vec<Vec3>,
+}
+
+/// A movable object (tree, bench): its own entity, so it can change while the player looks away.
+/// Part boxes are relative to `base`.
+struct Prop {
+    base: Vec3,
+    parts: Vec<(Aabb, Mat)>,
 }
 
 /// Random character of a chunk: share of buildings and plazas (the rest are parks), floor count range,
@@ -477,10 +659,12 @@ struct Theme {
 }
 
 /// One chunk: ground, road marks, then blocks and passages from a theme picked at random.
-fn generate(seed: u64, chunk: IVec2) -> Vec<(Aabb, Mat)> {
+fn generate(seed: u64, chunk: IVec2) -> (Vec<(Aabb, Mat)>, Vec<Prop>, Vec<Vec3>) {
     let mut b = Builder {
         rng: Rng(seed),
         parts: Vec::new(),
+        props: Vec::new(),
+        spots: Vec::new(),
     };
     let origin = chunk.as_vec2() * CHUNK_SIZE;
     b.add(
@@ -540,7 +724,7 @@ fn generate(seed: u64, chunk: IVec2) -> Vec<(Aabb, Mat)> {
     for p in &passages {
         b.passage(p);
     }
-    b.parts
+    (b.parts, b.props, b.spots)
 }
 
 /// Index of a block inside its chunk.
@@ -645,9 +829,10 @@ impl Builder {
                         z1: bz1,
                         floors: theme.floors.0
                             + self.rng.below(theme.floors.1 - theme.floors.0 + 1),
-                        wall: Mat::Wall(self.rng.below(WALL_COLORS as u32) as u8),
+                        wall: Mat::Wall(self.rng.below(WALLS as u32) as u8),
+                        floor: Mat::Floor(self.rng.below(FLOORS as u32) as u8),
                         xm: self.rng.range(stair_x1(bx) + 2.0, bx1 - 3.5),
-                        zm: self.rng.range(bz + T + 4.6, bz1 - 3.5),
+                        zm: self.rng.range(stair_z1(bz) + 3.0, bz1 - 3.5),
                         gaps: Vec::new(),
                     })
                 } else if roll < theme.building + theme.plaza {
@@ -698,7 +883,12 @@ impl Builder {
                     // Across range on both faces, clear of B's stairwell (south-west corner) and both
                     // interior walls, which meet the outer walls at xm / zm.
                     let (lo, hi, ma, mb) = if along_x {
-                        (a.z0.max(b.z0 + 1.5) + 1.5, a.z1.min(b.z1) - 1.5, a.zm, b.zm)
+                        (
+                            a.z0.max(stair_z1(b.z0)) + 1.5,
+                            a.z1.min(b.z1) - 1.5,
+                            a.zm,
+                            b.zm,
+                        )
                     } else {
                         (
                             a.x0.max(stair_x1(b.x0) + 1.5) + 0.5,
@@ -865,21 +1055,25 @@ impl Builder {
     }
 
     /// Building on a terrace at height `e`: outer walls with windows, a street door and the passage gaps,
-    /// four rooms per floor joined by doors, a staircase in the south-west corner on every floor (the top one
-    /// leads to the roof), a railing at each stair hole and a parapet on the roof.
+    /// four rooms per floor joined by doors, a switchback stairwell in the south-west corner (the top flight
+    /// leads to the roof), railings at each stair hole and a parapet on the roof.
+    /// Stairwell: two lanes side by side along x with a landing at each end. Flight k climbs in lane k % 2
+    /// (+x in lane 0, -x in lane 1), so the next flight starts where the last one ends, and the slab above
+    /// flight k has its hole over that lane only; flights never stack inside one another's head room.
     /// Floor slabs stop at the inner face of the outer walls, so no faces overlap.
     fn building(&mut self, bl: &Building, e: f32) {
         let (x0, z0, x1, z1) = (bl.x0, bl.z0, bl.x1, bl.z1);
         let steps = (FH / RISE) as i32;
-        let (sx0, sx1) = (x0 + T + 0.2, stair_x1(x0));
-        let (sz0, sz1) = (z0 + T, z0 + T + 1.6);
+        let (sx0, sx1) = (stair_x0(x0), stair_x1(x0));
+        let sz0 = z0 + T;
+        let sz1 = stair_z1(z0);
         let (ix0, iz0, ix1, iz1) = (x0 + T, z0 + T, x1 - T, z1 - T);
         let door_side = self.rng.below(4);
 
         self.add(
             Vec3::new(ix0, e, iz0),
             Vec3::new(ix1, e + 0.05, iz1),
-            Mat::Floor,
+            bl.floor,
         );
         for k in 0..=bl.floors {
             let y = e + k as f32 * FH;
@@ -910,6 +1104,22 @@ impl Builder {
                 } else {
                     self.openings(u0, u1, doors)
                 };
+                // Watcher spots: 0.6 m inside upper-floor windows, away from the stairwell.
+                if k >= 1 && !roof {
+                    for o in ops.iter().filter(|o| o.bottom > 0.0) {
+                        let inside = T + 0.6;
+                        let spot = match side {
+                            0 => Vec3::new(o.c, y, z0 + inside),
+                            1 => Vec3::new(o.c, y, z1 - inside),
+                            2 => Vec3::new(x0 + inside, y, o.c),
+                            _ => Vec3::new(x1 - inside, y, o.c),
+                        };
+                        let in_stairwell = spot.x < sx1 + 1.0 && spot.z < sz1 + 1.0;
+                        if !in_stairwell {
+                            self.spots.push(spot);
+                        }
+                    }
+                }
                 self.wall(along_x, u0, u1, v, y, h, T, &ops, bl.wall);
             }
             if roof {
@@ -944,25 +1154,41 @@ impl Builder {
                 Mat::Interior,
             );
 
+            let lane = k % 2;
+            let lz0 = sz0 + lane as f32 * LANE;
+            let lz1 = lz0 + LANE;
             for i in 0..steps {
-                let a = sx0 + i as f32 * RUN;
+                let a = if lane == 0 {
+                    sx0 + i as f32 * RUN
+                } else {
+                    sx1 - (i + 1) as f32 * RUN
+                };
                 self.add(
-                    Vec3::new(a, y, sz0),
-                    Vec3::new(a + RUN, y + (i + 1) as f32 * RISE, sz1),
+                    Vec3::new(a, y, lz0),
+                    Vec3::new(a + RUN, y + (i + 1) as f32 * RISE, lz1),
                     Mat::Stair,
                 );
             }
-            // Slab above with the stair hole, as boxes around it.
+            // Slab above with the hole over this flight's lane, as boxes around it; railings on the open
+            // sides of the hole (lane 0 lies against the south wall).
             let top = y + FH;
             let (y0, y1) = (top - 0.2, top);
-            self.add(Vec3::new(ix0, y0, iz0), Vec3::new(sx0, y1, iz1), Mat::Floor);
-            self.add(Vec3::new(sx1, y0, iz0), Vec3::new(ix1, y1, iz1), Mat::Floor);
-            self.add(Vec3::new(sx0, y0, sz1), Vec3::new(sx1, y1, iz1), Mat::Floor);
+            self.add(Vec3::new(ix0, y0, iz0), Vec3::new(sx0, y1, iz1), bl.floor);
+            self.add(Vec3::new(sx1, y0, iz0), Vec3::new(ix1, y1, iz1), bl.floor);
+            self.add(Vec3::new(sx0, y0, iz0), Vec3::new(sx1, y1, lz0), bl.floor);
+            self.add(Vec3::new(sx0, y0, lz1), Vec3::new(sx1, y1, iz1), bl.floor);
             self.add(
-                Vec3::new(sx0, top, sz1),
-                Vec3::new(sx1, top + 1.0, sz1 + 0.08),
+                Vec3::new(sx0, top, lz1),
+                Vec3::new(sx1, top + 1.0, lz1 + 0.08),
                 Mat::Metal,
             );
+            if lane == 1 {
+                self.add(
+                    Vec3::new(sx0, top, lz0 - 0.08),
+                    Vec3::new(sx1, top + 1.0, lz0),
+                    Mat::Metal,
+                );
+            }
         }
     }
 
@@ -1118,30 +1344,105 @@ impl Builder {
             let z = self.rng.range(z0 + 1.5, z1 - 1.5);
             let h = self.rng.range(2.0, 3.0);
             let r = self.rng.range(1.0, 1.8);
-            self.add(
-                Vec3::new(x - 0.2, g, z - 0.2),
-                Vec3::new(x + 0.2, g + h, z + 0.2),
-                Mat::Trunk,
-            );
-            self.add(
-                Vec3::new(x - r, g + h, z - r),
-                Vec3::new(x + r, g + h + r * 1.6, z + r),
-                Mat::Leaves,
-            );
+            let trunk = Aabb {
+                min: Vec3::new(-0.2, 0.0, -0.2),
+                max: Vec3::new(0.2, h, 0.2),
+            };
+            let crown = Aabb {
+                min: Vec3::new(-r, h, -r),
+                max: Vec3::new(r, h + r * 1.6, r),
+            };
+            self.props.push(Prop {
+                base: Vec3::new(x, g, z),
+                parts: vec![(trunk, Mat::Trunk), (crown, Mat::Leaves)],
+            });
         }
         for _ in 0..3 {
-            let x = self.rng.range(x0 + 1.0, x1 - 3.0);
+            let x = self.rng.range(x0 + 2.0, x1 - 2.0);
             let z = self.rng.range(z0 + 1.0, z1 - 1.0);
-            self.add(
-                Vec3::new(x, g, z),
-                Vec3::new(x + 1.8, g + 0.45, z + 0.5),
-                Mat::Stone,
-            );
+            let seat = Aabb {
+                min: Vec3::new(-0.9, 0.0, -0.25),
+                max: Vec3::new(0.9, 0.45, 0.25),
+            };
+            self.props.push(Prop {
+                base: Vec3::new(x, g, z),
+                parts: vec![(seat, Mat::Stone)],
+            });
         }
     }
 }
 
-/// East end of a building's staircase (it starts at the west wall and climbs along x).
-fn stair_x1(x0: f32) -> f32 {
-    x0 + T + 0.2 + (FH / RISE) * RUN
+/// Stairwell of a building with its west wall at `x0`: the flights run from `stair_x0` to `stair_x1`, with a
+/// 1 m landing between the west wall and `stair_x0` and the open floor east of `stair_x1` as the other landing.
+pub(crate) fn stair_x0(x0: f32) -> f32 {
+    x0 + T + 1.0
+}
+
+pub(crate) fn stair_x1(x0: f32) -> f32 {
+    stair_x0(x0) + (FH / RISE) * RUN
+}
+
+/// North edge of the two stair lanes of a building with its south wall at `z0`.
+pub(crate) fn stair_z1(z0: f32) -> f32 {
+    z0 + T + 2.0 * LANE
+}
+
+/// Boxes of a single building with `floors` stories at the origin, for movement tests.
+#[cfg(test)]
+pub(crate) fn test_building(floors: u32) -> Vec<Aabb> {
+    let mut b = Builder {
+        rng: Rng(7),
+        parts: Vec::new(),
+        props: Vec::new(),
+        spots: Vec::new(),
+    };
+    b.add(
+        Vec3::new(-20.0, -1.0, -20.0),
+        Vec3::new(40.0, 0.0, 40.0),
+        Mat::Asphalt,
+    );
+    let bl = Building {
+        x0: 0.0,
+        z0: 0.0,
+        x1: 18.0,
+        z1: 16.0,
+        floors,
+        wall: Mat::Wall(0),
+        floor: Mat::Floor(0),
+        xm: stair_x1(0.0) + 2.5,
+        zm: stair_z1(0.0) + 3.5,
+        gaps: Vec::new(),
+    };
+    b.building(&bl, 0.0);
+    b.parts.into_iter().map(|(a, _)| a).collect()
+}
+
+/// Boxes of one terrace block at height `e` (no content) and its south flight of steps, lowest step first.
+#[cfg(test)]
+pub(crate) fn test_terrace(e: f32) -> (Vec<Aabb>, Vec<Aabb>) {
+    let mut b = Builder {
+        rng: Rng(3),
+        parts: Vec::new(),
+        props: Vec::new(),
+        spots: Vec::new(),
+    };
+    b.add(
+        Vec3::new(-20.0, -1.0, -20.0),
+        Vec3::new(40.0, 0.0, 40.0),
+        Mat::Asphalt,
+    );
+    b.terrace(&Block {
+        x0: 0.0,
+        z0: 0.0,
+        e,
+        kind: Kind::Park,
+    });
+    let mut south: Vec<Aabb> = b
+        .parts
+        .iter()
+        .filter(|(a, m)| matches!(m, Mat::Stair) && a.max.z <= 0.0)
+        .map(|(a, _)| *a)
+        .collect();
+    south.sort_by(|a, b| a.max.y.total_cmp(&b.max.y));
+    (b.parts.into_iter().map(|(a, _)| a).collect(), south)
 }

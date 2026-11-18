@@ -1,9 +1,13 @@
 // Release builds on Windows run without a console window.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod cars;
+mod clouds;
+mod hud;
 mod level;
 mod player;
 mod textures;
+mod watchers;
 
 use bevy::prelude::*;
 
@@ -24,7 +28,14 @@ fn main() {
             brightness: 300.0,
             ..default()
         })
-        .add_plugins((level::LevelPlugin, player::PlayerPlugin))
+        .add_plugins((
+            level::LevelPlugin,
+            player::PlayerPlugin,
+            cars::CarsPlugin,
+            watchers::WatchersPlugin,
+            clouds::CloudsPlugin,
+            hud::HudPlugin,
+        ))
         .add_systems(Startup, setup)
         .run();
 }

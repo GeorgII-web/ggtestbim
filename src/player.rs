@@ -1,13 +1,15 @@
 //! First-person walker: mouse look, WASD with acceleration, running by default, Shift to walk, Ctrl to
 //! crouch (fits through windows), Space to jump, gravity, box collision with step-up on stairs and ledges
-//! (also in the air, to climb onto a window sill), snap-down on the way down, head bob and a landing dip.
+//! (also in the air, to climb onto a window sill), snap-down on the way down and a landing dip. Cars and
+//! props (trees, benches) collide too.
 //! Click grabs the mouse, Esc releases it.
 
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 
-use crate::level::{Aabb, Level};
+use crate::cars::CarBoxes;
+use crate::level::{Aabb, Level, PropBoxes};
 
 const RADIUS: f32 = 0.35;
 const STAND: f32 = 1.8;
@@ -15,13 +17,14 @@ const STAND: f32 = 1.8;
 const CROUCH: f32 = 0.9;
 /// Eye below the top of the body.
 const EYE_DROP: f32 = 0.15;
-const RUN: f32 = 7.5;
+const RUN: f32 = 15.0;
 const WALK: f32 = 3.5;
 const CRAWL: f32 = 2.2;
-/// Ground acceleration toward the wished speed, braking without input, air control.
-const ACCEL: f32 = 28.0;
-const BRAKE: f32 = 22.0;
-const AIR_ACCEL: f32 = 8.0;
+/// Ground acceleration toward the wished speed (low, so turning takes a moment), braking without input,
+/// air control.
+const ACCEL: f32 = 12.0;
+const BRAKE: f32 = 10.0;
+const AIR_ACCEL: f32 = 3.0;
 /// Jump apex 1.4 m: a crouched body lifts its feet over a 1.0 m window sill.
 const JUMP: f32 = 7.5;
 const GRAVITY: f32 = 20.0;
@@ -40,8 +43,13 @@ pub struct PlayerPlugin;
 
 impl Plugin for PlayerPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, (spawn_player, grab))
-            .add_systems(Update, (cursor_toggle, look, walk).chain());
+        app.add_systems(Startup, (spawn_player, grab)).add_systems(
+            Update,
+            (cursor_toggle, look, walk)
+                .chain()
+                .after(crate::cars::drive)
+                .after(crate::level::prop_boxes),
+        );
     }
 }
 
@@ -55,8 +63,6 @@ pub struct Player {
     height: f32,
     /// Smoothed eye height above the feet.
     eye: f32,
-    bob_phase: f32,
-    bob_amp: f32,
     /// Camera dip after a landing, decays back to 0.
     dip: f32,
     /// Seconds since the feet last touched the ground, and since Space was last pressed.
@@ -88,8 +94,6 @@ fn spawn_player(mut commands: Commands) {
             grounded: false,
             height: STAND,
             eye: STAND - EYE_DROP,
-            bob_phase: 0.0,
-            bob_amp: 0.0,
             dip: 0.0,
             air_time: 0.0,
             jump_pressed: f32::MAX,
@@ -139,6 +143,8 @@ fn walk(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
     level: Res<Level>,
+    cars: Res<CarBoxes>,
+    props: Res<PropBoxes>,
     player: Single<(&mut Player, &mut Transform)>,
 ) {
     let (mut p, mut tf) = player.into_inner();
@@ -152,7 +158,9 @@ fn walk(
     if !level.loaded(p.pos) {
         return;
     }
-    let near = level.near(p.pos);
+    let mut near = level.near(p.pos);
+    near.push(&cars.0);
+    near.push(&props.0);
 
     let crouch_key = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
     if crouch_key {
@@ -223,21 +231,12 @@ fn walk(
         p.dip = (fall_speed * 0.02).min(0.3);
     }
 
-    // Head bob grows with ground speed; eye height and dip ease toward their targets.
-    let ground_speed = horizontal.length();
-    let target_amp = if p.grounded {
-        0.045 * (ground_speed / RUN).min(1.0)
-    } else {
-        0.0
-    };
-    p.bob_amp += (target_amp - p.bob_amp) * (1.0 - (-8.0 * dt).exp());
-    p.bob_phase += ground_speed * dt * 2.2;
+    // Eye height (crouching) and the landing dip ease toward their targets.
     let target_eye = p.height - EYE_DROP;
     p.eye += (target_eye - p.eye) * (1.0 - (-12.0 * dt).exp());
     p.dip *= (-6.0 * dt).exp();
-    let bob = p.bob_phase.sin().abs() * p.bob_amp;
 
-    tf.translation = p.pos + Vec3::Y * (p.eye + bob - p.dip);
+    tf.translation = p.pos + Vec3::Y * (p.eye - p.dip);
     tf.rotation = Quat::from_euler(EulerRot::YXZ, p.yaw, p.pitch, 0.0);
 }
 
@@ -338,4 +337,96 @@ fn overlap(a: &Aabb, b: &Aabb) -> bool {
         && a.max.y > b.min.y + E
         && a.min.z < b.max.z - E
         && a.max.z > b.min.z + E
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::level::{FH, LANE, T, stair_x0, stair_x1, test_building, test_terrace};
+
+    fn player_at(pos: Vec3) -> Player {
+        Player {
+            pos,
+            vel: Vec3::ZERO,
+            yaw: 0.0,
+            pitch: 0.0,
+            grounded: true,
+            height: STAND,
+            eye: 0.0,
+            dip: 0.0,
+            air_time: 0.0,
+            jump_pressed: f32::MAX,
+        }
+    }
+
+    /// Walks straight toward `target` (x, z) at walking speed, with gravity, for at most `secs`.
+    fn walk_to(p: &mut Player, near: &[&[Aabb]], target: Vec2, secs: f32) {
+        let dt = 1.0 / 60.0;
+        let mut t = 0.0;
+        while t < secs {
+            let to = target - Vec2::new(p.pos.x, p.pos.z);
+            if to.length() < 0.05 {
+                return;
+            }
+            let v = to.normalize() * WALK.min(to.length() / dt);
+            p.vel.x = v.x;
+            p.vel.z = v.y;
+            p.vel.y = (p.vel.y - GRAVITY * dt).max(-MAX_FALL);
+            let n = ((p.vel * dt).abs().max_element() / MAX_SUBSTEP)
+                .ceil()
+                .max(1.0) as usize;
+            for _ in 0..n {
+                substep(p, near, dt / n as f32);
+            }
+            t += dt;
+        }
+    }
+
+    /// Up a 6-story building flight by flight: along each lane, turn on the landing, to the roof.
+    #[test]
+    fn climbs_switchback_stairs_to_the_roof() {
+        let floors = 6;
+        let boxes = test_building(floors);
+        let near = [&boxes[..]];
+        let (sx0, sx1) = (stair_x0(0.0), stair_x1(0.0));
+        let lane_z = |lane: u32| T + (lane as f32 + 0.5) * LANE;
+        let (west, east) = ((T + sx0) / 2.0, sx1 + 1.0);
+        let mut p = player_at(Vec3::new(west, 0.05, lane_z(0)));
+        for k in 0..floors {
+            let lane = k % 2;
+            let (from, to) = if lane == 0 {
+                (west, east)
+            } else {
+                (east, west)
+            };
+            walk_to(&mut p, &near, Vec2::new(from, lane_z(lane)), 3.0);
+            walk_to(&mut p, &near, Vec2::new(to, lane_z(lane)), 6.0);
+            let expected = (k + 1) as f32 * FH;
+            assert!(
+                (p.pos.y - expected).abs() < 0.1,
+                "flight {k}: expected y {expected}, at {:?}",
+                p.pos
+            );
+        }
+    }
+
+    /// Up the flight beside a 6 m terrace from the street, then sideways onto the terrace.
+    #[test]
+    fn climbs_terrace_stairs() {
+        let (boxes, steps) = test_terrace(6.0);
+        let near = [&boxes[..]];
+        let (low, high) = (steps[0], steps[steps.len() - 1]);
+        let dir = (high.min.x - low.min.x).signum();
+        let z = (low.min.z + low.max.z) / 2.0;
+        let start = (low.min.x + low.max.x) / 2.0 - dir * 1.5;
+        let end = (high.min.x + high.max.x) / 2.0;
+        let mut p = player_at(Vec3::new(start, 0.0, z));
+        walk_to(&mut p, &near, Vec2::new(end, z), 8.0);
+        walk_to(&mut p, &near, Vec2::new(end, 2.0), 2.0);
+        assert!(
+            (p.pos.y - 6.0).abs() < 0.1 && p.pos.z > 1.5,
+            "at {:?}",
+            p.pos
+        );
+    }
 }
