@@ -17,7 +17,7 @@ impl Plugin for WatchersPlugin {
 }
 
 /// Share of new chunks with window spots that get a watcher.
-const CHANCE: f32 = 0.15;
+const CHANCE: f32 = 0.35;
 /// Closer than this and the watcher moves away; a new spot must be at least `FAR` from the player.
 const FLEE: f32 = 16.0;
 const FAR: f32 = 30.0;
@@ -52,7 +52,7 @@ fn setup_watchers(
         }),
         eyes: materials.add(StandardMaterial {
             base_color: Color::srgb(1.0, 0.9, 0.6),
-            emissive: LinearRgba::rgb(12.0, 8.0, 3.0),
+            emissive: LinearRgba::rgb(30.0, 20.0, 6.0),
             unlit: true,
             ..default()
         }),
@@ -106,7 +106,7 @@ fn spawn_watchers(
                 for x in [-0.08, 0.08] {
                     c.spawn(part(
                         Vec3::new(x, 2.4, -0.17),
-                        Vec3::new(0.07, 0.04, 0.02),
+                        Vec3::new(0.1, 0.07, 0.02),
                         &assets.eyes,
                     ));
                 }

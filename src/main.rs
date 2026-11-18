@@ -9,10 +9,11 @@ mod player;
 mod textures;
 mod watchers;
 
+use bevy::light::{CascadeShadowConfigBuilder, DirectionalLightShadowMap};
 use bevy::prelude::*;
 
-const HELP: &str = "WASD move (runs) · Shift walk · Ctrl crouch · Space jump · mouse look
-Crouch + jump into windows · Click grab mouse · Esc release · R new world";
+const HELP: &str = "WASD move (runs) | Shift walk | Ctrl crouch | Space jump | mouse look
+Crouch + jump into windows | Click grab mouse | Esc release | R new world";
 
 fn main() {
     App::new()
@@ -36,6 +37,8 @@ fn main() {
             clouds::CloudsPlugin,
             hud::HudPlugin,
         ))
+        // Sharp shadows near the player: a bigger shadow map split into cascades that are dense up close.
+        .insert_resource(DirectionalLightShadowMap { size: 4096 })
         .add_systems(Startup, setup)
         .run();
 }
@@ -48,6 +51,13 @@ fn setup(mut commands: Commands) {
             ..default()
         },
         Transform::from_xyz(30.0, 60.0, 20.0).looking_at(Vec3::ZERO, Vec3::Y),
+        CascadeShadowConfigBuilder {
+            num_cascades: 4,
+            first_cascade_far_bound: 12.0,
+            maximum_distance: 160.0,
+            ..default()
+        }
+        .build(),
     ));
     commands.spawn((
         Text::new(HELP),

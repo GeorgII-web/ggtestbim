@@ -1,4 +1,4 @@
-//! Compass at the top center: a strip of 15° ticks with N/E/S/W around the view direction, a marker
+//! Compass at the top center: a strip of 15 degree ticks with N/E/S/W around the view direction, a marker
 //! under the middle and the heading in degrees. North is -z, headings grow clockwise.
 
 use bevy::prelude::*;
@@ -54,7 +54,7 @@ fn compass(camera: Single<&Transform, With<Player>>, mut text: Single<&mut Text,
             180 => "S",
             270 => "W",
             45 | 135 | 225 | 315 => "+",
-            _ => "·",
+            _ => ".",
         })
         .collect();
     let marker = format!(
@@ -62,5 +62,5 @@ fn compass(camera: Single<&Transform, With<Player>>, mut text: Single<&mut Text,
         "  ".repeat(HALF as usize),
         "  ".repeat(HALF as usize)
     );
-    text.0 = format!("{}\n{}\n{:03.0}°", strip.join(" "), marker, heading);
+    text.0 = format!("{}\n{}\n{:03.0}", strip.join(" "), marker, heading);
 }

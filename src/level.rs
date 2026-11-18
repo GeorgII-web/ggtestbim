@@ -450,7 +450,7 @@ pub(crate) fn prop_boxes(
     }
 }
 
-/// Every 1.5 s each prop behind the player (more than 100° from the view direction, 5 to 70 m away) has
+/// Every 1.5 s each prop behind the player (more than 100 degrees from the view direction, 5 to 70 m away) has
 /// a 4 % chance to change: grow or shrink, stretch, turn, or take an odd color.
 fn haunt(
     time: Res<Time>,

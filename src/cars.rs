@@ -1,4 +1,4 @@
-//! Cars on the streets: a few per newly generated chunk, driving straight along a street lane through the
+//! Cars on the streets: rare, one in about every third newly generated chunk, driving straight along a street lane through the
 //! world, braking for the player in front of them, removed when they reach an unloaded chunk. Their boxes
 //! are colliders for the player (bump into them, jump on the roof).
 
@@ -18,7 +18,8 @@ impl Plugin for CarsPlugin {
     }
 }
 
-const PER_CHUNK: u32 = 3;
+/// Share of new chunks that get a car: cars are rare.
+const CHANCE: f32 = 0.3;
 /// Lane center distance from the street center line; a car is 1.8 m wide, so it stays clear of the
 /// terrace stairs that reach 1.6 m into the street from the block edge.
 const LANE: f32 = 1.2;
@@ -90,7 +91,10 @@ fn spawn_cars(mut commands: Commands, assets: Res<CarAssets>, mut level: ResMut<
     let chunks = std::mem::take(&mut level.new_chunks);
     for c in chunks {
         let origin = c.as_vec2() * CHUNK_SIZE;
-        for _ in 0..PER_CHUNK {
+        if !level.rng.chance(CHANCE) {
+            continue;
+        }
+        {
             let rng = &mut level.rng;
             let along_x = rng.chance(0.5);
             let dir = if rng.chance(0.5) { 1.0 } else { -1.0 };
