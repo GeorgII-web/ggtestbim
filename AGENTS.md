@@ -7,11 +7,13 @@ Personal 3D game in Rust on [Bevy](https://bevyengine.org) 0.20, target Windows 
 | Module | What |
 |---|---|
 | `src/main.rs` | app, sun, sky, ambient light, help text |
-| `src/level.rs` | seeded city generator: street grid, buildings (rooms, doors, windows, stairs, walkable roof), plazas, parks; every part is an axis-aligned box that is both the mesh and the collider (`Level.boxes`); R regenerates with the next seed |
-| `src/player.rs` | first-person walker: mouse look, WASD, Shift run, Space jump, gravity, box collision with step-up (max 0.55 m), substeps against tunneling, respawn below -30 m or on R |
+| `src/level.rs` | endless world streamed in 60 m chunks (2×2 blocks): chunks within 3 of the player are generated (2 per frame, nearest first), chunks beyond 4 are dropped, a revisited area is generated anew with a fresh seed. Each chunk has a random theme (downtown, hills, parkland, mixed): terraces with stairs, buildings (rooms, doors, windows, stairs to a walkable roof), plazas, parks, corridors between upper floors and bridges between roofs. Every part is an axis-aligned box: collider per chunk (`Level::near`) and, merged per material, one mesh with world-space UVs; R drops the world |
+| `src/textures.rs` | procedural tileable grayscale textures (plaster, brick, tiles, asphalt, grass, wood, concrete, stone, leaves, water, bark) with a mip chain, tinted by the material color |
+| `src/player.rs` | first-person walker: mouse look, acceleration, run by default, Shift walk, Ctrl crouch (0.9 m, fits a window), jump with coyote time and buffer, gravity, box collision with step-up (also in the air, onto sills), snap-down on stairs, head bob, landing dip, distance fog; respawn below -30 m or on R |
 
-Geometry rules the collider relies on: walls, slabs and steps are boxes; a stair step rises 0.25 m (under the step-up
-limit); slabs are at least 0.2 m thick (above the 0.15 m substep).
+Geometry rules the collider relies on: walls, slabs and steps are boxes; a stair step rises 0.25 m (under the 0.55 m
+step-up); slabs are at least 0.2 m thick (above the 0.15 m substep); no two boxes share a visible face plane
+(slabs stop at the inner wall face), or the faces flicker.
 
 ## Build
 

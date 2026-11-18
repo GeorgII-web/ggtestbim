@@ -3,11 +3,12 @@
 
 mod level;
 mod player;
+mod textures;
 
 use bevy::prelude::*;
 
-const HELP: &str =
-    "WASD move · Shift run · Space jump · mouse look\nClick grab mouse · Esc release · R new city";
+const HELP: &str = "WASD move (runs) · Shift walk · Ctrl crouch · Space jump · mouse look
+Crouch + jump into windows · Click grab mouse · Esc release · R new world";
 
 fn main() {
     App::new()
@@ -18,9 +19,9 @@ fn main() {
             }),
             ..default()
         }))
-        .insert_resource(ClearColor(Color::srgb(0.55, 0.75, 0.95)))
+        .insert_resource(ClearColor(Color::srgb(0.62, 0.77, 0.93)))
         .insert_resource(GlobalAmbientLight {
-            brightness: 400.0,
+            brightness: 300.0,
             ..default()
         })
         .add_plugins((level::LevelPlugin, player::PlayerPlugin))
