@@ -20,11 +20,12 @@ const EYE_DROP: f32 = 0.15;
 const RUN: f32 = 15.0;
 const WALK: f32 = 3.5;
 const CRAWL: f32 = 2.2;
-/// Ground acceleration toward the wished speed (low, so turning takes a moment), braking without input,
+/// Ground acceleration toward the wished speed (high: light and snappy, full run speed in ~0.2 s), braking
+/// without input,
 /// air control.
-const ACCEL: f32 = 14.0;
-const BRAKE: f32 = 11.0;
-const AIR_ACCEL: f32 = 4.0;
+const ACCEL: f32 = 80.0;
+const BRAKE: f32 = 80.0;
+const AIR_ACCEL: f32 = 14.0;
 /// Jump apex 1.4 m: a crouched body lifts its feet over a 1.0 m window sill.
 const JUMP: f32 = 7.5;
 const GRAVITY: f32 = 20.0;
