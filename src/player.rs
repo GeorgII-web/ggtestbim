@@ -164,7 +164,9 @@ fn walk(
     near.push(&props.0);
 
     let crouch_key = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
-    if crouch_key {
+    // Crouching starts only on the ground (Ctrl in the air does nothing); a crouch begun on the ground holds
+    // through a jump, for climbing into windows.
+    if crouch_key && (p.grounded || p.height < STAND) {
         p.height = CROUCH;
     } else if p.height < STAND && !hits(&near, p.pos, STAND) {
         p.height = STAND;
