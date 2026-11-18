@@ -1,7 +1,13 @@
 // Release builds on Windows run without a console window.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod level;
+mod player;
+
 use bevy::prelude::*;
+
+const HELP: &str =
+    "WASD move · Shift run · Space jump · mouse look\nClick grab mouse · Esc release · R new city";
 
 fn main() {
     App::new()
@@ -12,44 +18,32 @@ fn main() {
             }),
             ..default()
         }))
+        .insert_resource(ClearColor(Color::srgb(0.55, 0.75, 0.95)))
+        .insert_resource(GlobalAmbientLight {
+            brightness: 400.0,
+            ..default()
+        })
+        .add_plugins((level::LevelPlugin, player::PlayerPlugin))
         .add_systems(Startup, setup)
-        .add_systems(Update, spin)
         .run();
 }
 
-#[derive(Component)]
-struct Spin;
-
-fn setup(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-) {
+fn setup(mut commands: Commands) {
     commands.spawn((
-        Mesh3d(meshes.add(Plane3d::default().mesh().size(10.0, 10.0))),
-        MeshMaterial3d(materials.add(Color::srgb(0.3, 0.5, 0.3))),
-    ));
-    commands.spawn((
-        Mesh3d(meshes.add(Cuboid::new(1.0, 1.0, 1.0))),
-        MeshMaterial3d(materials.add(Color::srgb(0.8, 0.4, 0.2))),
-        Transform::from_xyz(0.0, 1.0, 0.0),
-        Spin,
-    ));
-    commands.spawn((
-        PointLight {
+        DirectionalLight {
+            illuminance: 8000.0,
             shadow_maps_enabled: true,
             ..default()
         },
-        Transform::from_xyz(4.0, 8.0, 4.0),
+        Transform::from_xyz(30.0, 60.0, 20.0).looking_at(Vec3::ZERO, Vec3::Y),
     ));
     commands.spawn((
-        Camera3d::default(),
-        Transform::from_xyz(-3.0, 3.5, 6.0).looking_at(Vec3::new(0.0, 0.5, 0.0), Vec3::Y),
+        Text::new(HELP),
+        Node {
+            position_type: PositionType::Absolute,
+            top: Val::Px(8.0),
+            left: Val::Px(8.0),
+            ..default()
+        },
     ));
-}
-
-fn spin(time: Res<Time>, mut cubes: Query<&mut Transform, With<Spin>>) {
-    for mut transform in &mut cubes {
-        transform.rotate_y(time.delta_secs());
-    }
 }
