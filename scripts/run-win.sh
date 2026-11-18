@@ -10,4 +10,4 @@ dest=/mnt/c/dev/ggtestbim
 mkdir -p "$dest"
 cp "target/x86_64-pc-windows-gnu/$profile/ggtestbim.exe" "$dest/"
 [ -d assets ] && cp -r assets "$dest/"
-cd "$dest" && cmd.exe /c start "" ggtestbim.exe
+cd "$dest" && powershell.exe -NoProfile -Command "Start-Process -FilePath .\\ggtestbim.exe -WorkingDirectory C:\\dev\\ggtestbim"
