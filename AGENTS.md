@@ -17,7 +17,9 @@ Personal 3D game in Rust on [Bevy](https://bevyengine.org) 0.20, target Windows 
 
 Geometry rules the collider relies on: walls, slabs and steps are boxes; a stair step rises 0.25 m (under the 0.55 m
 step-up); stair flights never lie inside another flight's head room (switchback lanes); slabs are at least 0.2 m thick (above the 0.15 m substep); no two boxes share a visible face plane
-(slabs stop at the inner wall face), or the faces flicker.
+(slabs stop at the inner wall face, interior walls stop under the slab above, stair railings sit inside the hole's
+lane, plaza low walls differ in height, benches keep apart), or the faces flicker; the test
+`level::tests::no_coplanar_visible_faces` checks this on 20 generated chunks (props left out).
 
 ## Build
 

@@ -1189,7 +1189,8 @@ impl Builder {
             if roof {
                 break;
             }
-            // Interior walls, two doors each, kept away from the crossing.
+            // Interior walls, two doors each, kept away from the crossing; they stop under the slab above, so
+            // their tops don't share the floor plane of the next story.
             let (xm, zm) = (bl.xm, bl.zm);
             let d1 = self.rng.range(ix0 + 1.2, xm - 1.5);
             let d2 = self.rng.range(xm + 1.5, ix1 - 1.2);
@@ -1199,7 +1200,7 @@ impl Builder {
                 ix1,
                 zm,
                 y,
-                FH,
+                FH - 0.2,
                 0.2,
                 &[door_at(d1), door_at(d2)],
                 Mat::Interior,
@@ -1212,7 +1213,7 @@ impl Builder {
                 iz1,
                 xm,
                 y,
-                FH,
+                FH - 0.2,
                 0.2,
                 &[door_at(d1), door_at(d2)],
                 Mat::Interior,
@@ -1234,7 +1235,8 @@ impl Builder {
                 );
             }
             // Slab above with the hole over this flight's lane, as boxes around it; railings on the open
-            // sides of the hole (lane 0 lies against the south wall).
+            // sides of the hole (lane 0 lies against the south wall), inside the hole's lane: the next flight
+            // starts in the other lane at the slab's height, and a railing there would cut into its steps.
             let top = y + FH;
             let (y0, y1) = (top - 0.2, top);
             self.add(Vec3::new(ix0, y0, iz0), Vec3::new(sx0, y1, iz1), bl.floor);
@@ -1242,14 +1244,14 @@ impl Builder {
             self.add(Vec3::new(sx0, y0, iz0), Vec3::new(sx1, y1, lz0), bl.floor);
             self.add(Vec3::new(sx0, y0, lz1), Vec3::new(sx1, y1, iz1), bl.floor);
             self.add(
-                Vec3::new(sx0, top, lz1),
-                Vec3::new(sx1, top + 1.0, lz1 + 0.08),
+                Vec3::new(sx0, top, lz1 - 0.08),
+                Vec3::new(sx1, top + 1.0, lz1),
                 Mat::Metal,
             );
             if lane == 1 {
                 self.add(
-                    Vec3::new(sx0, top, lz0 - 0.08),
-                    Vec3::new(sx1, top + 1.0, lz0),
+                    Vec3::new(sx0, top, lz0),
+                    Vec3::new(sx1, top + 1.0, lz0 + 0.08),
                     Mat::Metal,
                 );
             }
@@ -1390,7 +1392,8 @@ impl Builder {
                 );
             }
         }
-        for _ in 0..3 {
+        // Low walls of different heights: two that cross never share a top face.
+        for h in [0.75, 0.9, 1.05] {
             let len = self.rng.range(3.0, 6.0);
             let along_x = self.rng.chance(0.5);
             let u = if along_x {
@@ -1403,7 +1406,7 @@ impl Builder {
             } else {
                 self.rng.range(x1 - 3.0, x1 - 0.5)
             };
-            self.wall(along_x, u, u + len, v, p, 0.9, 0.4, &[], Mat::Stone);
+            self.wall(along_x, u, u + len, v, p, h, 0.4, &[], Mat::Stone);
         }
     }
 
@@ -1433,8 +1436,11 @@ impl Builder {
                 parts: vec![(trunk, Mat::Trunk), (crown, Mat::Leaves)],
             });
         }
-        for _ in 0..3 {
-            let x = self.rng.range(x0 + 2.0, x1 - 2.0);
+        // One bench per third of the block along x, so two never overlap.
+        let w = (x1 - x0 - 4.0) / 3.0;
+        for i in 0..3 {
+            let a = x0 + 2.0 + i as f32 * w;
+            let x = self.rng.range(a + 0.9, a + w - 0.9);
             let z = self.rng.range(z0 + 1.0, z1 - 1.0);
             let seat = Aabb {
                 min: Vec3::new(-0.9, 0.0, -0.25),
@@ -1523,4 +1529,50 @@ pub(crate) fn test_terrace(e: f32) -> (Vec<Aabb>, Vec<Aabb>) {
         .collect();
     south.sort_by(|a, b| a.max.y.total_cmp(&b.max.y));
     (b.parts.into_iter().map(|(a, _)| a).collect(), south)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// No two boxes of the level show an overlapping face in the same plane and direction (it flickers):
+    /// a face counts when a point 1 cm in front of the overlap's center lies in no box. Props are left out.
+    #[test]
+    fn no_coplanar_visible_faces() {
+        for s in 0..20u64 {
+            let (parts, _, _, _) = generate(s * 7919 + 1, IVec2::new(0, s as i32));
+            let boxes: Vec<Aabb> = parts.iter().map(|(a, _)| *a).collect();
+            let covered = |c: Vec3| {
+                boxes
+                    .iter()
+                    .any(|o| c.cmpgt(o.min).all() && c.cmplt(o.max).all())
+            };
+            for (i, a) in boxes.iter().enumerate() {
+                for b in &boxes[i + 1..] {
+                    for ax in 0..3 {
+                        let (u, v) = ((ax + 1) % 3, (ax + 2) % 3);
+                        let lo = a.min.max(b.min);
+                        let hi = a.max.min(b.max);
+                        if hi[u] - lo[u] <= 0.01 || hi[v] - lo[v] <= 0.01 {
+                            continue;
+                        }
+                        for (fa, fb, d) in
+                            [(a.min[ax], b.min[ax], -0.01), (a.max[ax], b.max[ax], 0.01)]
+                        {
+                            let mut c = (lo + hi) / 2.0;
+                            c[ax] = fa + d;
+                            assert!(
+                                (fa - fb).abs() >= 1e-3 || covered(c),
+                                "seed {s}: faces fight at {c:?}: {:?}-{:?} vs {:?}-{:?}",
+                                a.min,
+                                a.max,
+                                b.min,
+                                b.max
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
