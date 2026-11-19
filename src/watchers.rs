@@ -1,11 +1,13 @@
-//! Watchers: tall dark figures with a pale face and glowing eyes standing behind windows, at building corners or on roofs,
-//! always turned toward the player. They can't be caught: come within `FLEE` and the watcher is gone, to a
-//! spot far away (or nowhere); once seen, it moves the moment the player looks away, and while unseen it
-//! may wander to another spot of its chunk.
+//! Watchers: tall dark figures with a pale face and glowing eyes, standing behind windows, at building
+//! corners or (rarely) on roofs, turned toward the player. When the player really sees one (on screen and
+//! in line of sight) for a moment, or comes within `FLEE`, it runs along its spot's escape (deeper into the
+//! room, around the corner, back from the roof edge) and hides there. Once the player can't see it, it is
+//! gone: it turns up again at another spot of its chunk, far from the player and out of sight.
+//! It can't be caught: closer than `CATCH` it vanishes on the spot. While unseen, it may wander.
 
 use bevy::prelude::*;
 
-use crate::level::Level;
+use crate::level::{Level, Rng, Spot, SpotKind};
 use crate::player::Player;
 
 pub struct WatchersPlugin;
@@ -20,19 +22,49 @@ impl Plugin for WatchersPlugin {
 /// Chance of each of the (up to) `PER_CHUNK` watchers of a new chunk with spots.
 const CHANCE: f32 = 0.9;
 const PER_CHUNK: usize = 4;
-/// Closer than this and the watcher moves away; a new spot must be at least `FAR` from the player.
+/// Spot kind weights for placing a watcher: mostly windows and corners, roofs now and then.
+const WEIGHTS: [(SpotKind, f32); 3] = [
+    (SpotKind::Window, 0.5),
+    (SpotKind::Corner, 0.4),
+    (SpotKind::Roof, 0.1),
+];
+/// Closer than this and the watcher runs; a new spot must be at least `FAR` from the player.
 const FLEE: f32 = 20.0;
 const FAR: f32 = 30.0;
-/// While unseen, every `WANDER_EVERY` seconds a watcher may move to another window of its chunk.
+/// Closer than this it vanishes on the spot, even in plain view.
+const CATCH: f32 = 5.0;
+/// Seen this long (random in the range) and it runs.
+const REACT: (f32, f32) = (0.3, 0.9);
+const RUN_SPEED: f32 = 6.0;
+/// Hidden at the end of its escape, it stays at least this long before it can be gone.
+const HIDE_MIN: f32 = 0.6;
+/// Beyond this distance it is too small to count as seen.
+const SEE_DIST: f32 = 120.0;
+/// While unseen, every `WANDER_EVERY` seconds a watcher may move to another spot of its chunk.
 const WANDER_EVERY: f32 = 6.0;
+/// Head height above the feet, the target of the line of sight.
+const HEAD: f32 = 2.3;
 const HIDDEN: Vec3 = Vec3::new(0.0, -500.0, 0.0);
+
+enum State {
+    /// Standing at its spot, watching the player; `seen` counts how long the player has seen it.
+    Watch { seen: f32 },
+    /// Running along the escape waypoints, `next` is the one it heads for.
+    Run { path: Vec<Vec3>, next: usize },
+    /// At the end of its escape, waiting to be out of sight.
+    Hide,
+    /// Nowhere (at `HIDDEN`), waiting for a free spot.
+    Gone,
+}
 
 #[derive(Component)]
 struct Watcher {
-    spots: Vec<Vec3>,
+    spots: Vec<Spot>,
+    /// Index of the spot it stands at (or ran from).
+    spot: usize,
+    state: State,
     clock: f32,
-    /// The player has looked at it at this spot: it leaves as soon as the player looks away.
-    noticed: bool,
+    react: f32,
 }
 
 #[derive(Resource)]
@@ -71,6 +103,29 @@ fn setup_watchers(
     });
 }
 
+/// A random spot index by the kind weights, among the indices `ok` accepts (kinds with none are skipped).
+fn pick(rng: &mut Rng, spots: &[Spot], ok: impl Fn(usize) -> bool) -> Option<usize> {
+    let kinds: Vec<(SpotKind, f32)> = WEIGHTS
+        .iter()
+        .copied()
+        .filter(|(k, _)| (0..spots.len()).any(|i| spots[i].kind == *k && ok(i)))
+        .collect();
+    let total: f32 = kinds.iter().map(|(_, w)| w).sum();
+    let mut r = rng.unit() * total;
+    let kind = kinds
+        .iter()
+        .find(|(_, w)| {
+            r -= w;
+            r <= 0.0
+        })
+        .or(kinds.last())?
+        .0;
+    let of_kind: Vec<usize> = (0..spots.len())
+        .filter(|&i| spots[i].kind == kind && ok(i))
+        .collect();
+    Some(of_kind[rng.below(of_kind.len() as u32) as usize])
+}
+
 fn spawn_watchers(
     mut commands: Commands,
     assets: Res<WatcherAssets>,
@@ -86,21 +141,31 @@ fn spawn_watchers(
     }
     let all = std::mem::take(&mut level.new_spots);
     for spots in all {
-        if spots.is_empty() {
-            continue;
-        }
-        // Different spots, or two figures would overlap.
-        let first = level.rng.below(spots.len() as u32) as usize;
-        for k in 0..PER_CHUNK.min(spots.len()) {
-            if level.rng.chance(CHANCE) {
-                let at = spots[(first + k * spots.len() / PER_CHUNK) % spots.len()];
-                spawn_watcher(&mut commands, &assets, at, spots.clone());
+        let mut taken: Vec<usize> = Vec::new();
+        for _ in 0..PER_CHUNK {
+            if !level.rng.chance(CHANCE) {
+                continue;
             }
+            // Different spots, or two figures would overlap.
+            let Some(i) = pick(&mut level.rng, &spots, |i| {
+                !taken.iter().any(|&t| spots[t].pos == spots[i].pos)
+            }) else {
+                break;
+            };
+            taken.push(i);
+            let react = level.rng.range(REACT.0, REACT.1);
+            spawn_watcher(&mut commands, &assets, spots.clone(), i, react);
         }
     }
 }
 
-fn spawn_watcher(commands: &mut Commands, assets: &WatcherAssets, at: Vec3, spots: Vec<Vec3>) {
+fn spawn_watcher(
+    commands: &mut Commands,
+    assets: &WatcherAssets,
+    spots: Vec<Spot>,
+    spot: usize,
+    react: f32,
+) {
     let part = |center: Vec3, size: Vec3, mat: &Handle<StandardMaterial>| {
         (
             Mesh3d(assets.cube.clone()),
@@ -111,12 +176,14 @@ fn spawn_watcher(commands: &mut Commands, assets: &WatcherAssets, at: Vec3, spot
     // Modeled facing local -z: thin body, long neck, pale head, two eyes on the front.
     commands
         .spawn((
-            Transform::from_translation(at),
+            Transform::from_translation(spots[spot].pos),
             Visibility::default(),
             Watcher {
                 spots,
+                spot,
+                state: State::Watch { seen: 0.0 },
                 clock: 0.0,
-                noticed: false,
+                react,
             },
         ))
         .with_children(|c| {
@@ -140,6 +207,35 @@ fn spawn_watcher(commands: &mut Commands, assets: &WatcherAssets, at: Vec3, spot
         });
 }
 
+/// The player sees a point: on screen (well inside the view), near enough and nothing in between.
+fn sees(level: &Level, eye: Vec3, forward: Vec3, p: Vec3) -> bool {
+    let to = p - eye;
+    to.length() < SEE_DIST && to.normalize().dot(forward) > 0.75 && !level.blocked(eye, p)
+}
+
+/// Puts the watcher at a spot of its chunk far from the player and out of sight, or nowhere if none is free.
+fn relocate(w: &mut Watcher, level: &mut Level, tf: &mut Transform, eye: Vec3, forward: Vec3) {
+    let free: Vec<bool> = w
+        .spots
+        .iter()
+        .map(|s| s.pos.distance(eye) > FAR && !sees(level, eye, forward, s.pos + Vec3::Y * HEAD))
+        .collect();
+    let found = pick(&mut level.rng, &w.spots, |i| free[i]);
+    w.clock = 0.0;
+    match found {
+        Some(i) => {
+            w.spot = i;
+            w.state = State::Watch { seen: 0.0 };
+            w.react = level.rng.range(REACT.0, REACT.1);
+            tf.translation = w.spots[i].pos;
+        }
+        None => {
+            w.state = State::Gone;
+            tf.translation = HIDDEN;
+        }
+    }
+}
+
 fn watch(
     time: Res<Time>,
     mut commands: Commands,
@@ -147,46 +243,68 @@ fn watch(
     mut watchers: Query<(Entity, &mut Watcher, &mut Transform)>,
     mut level: ResMut<Level>,
 ) {
+    let dt = time.delta_secs();
     let eye = camera.translation;
     let forward = camera.forward().as_vec3();
     for (e, mut w, mut tf) in &mut watchers {
-        // Its windows are gone with their chunk.
-        if !level.loaded(w.spots[0]) {
+        // Its spots are gone with their chunk.
+        if !level.loaded(w.spots[0].pos) {
             commands.entity(e).despawn();
             continue;
         }
-        w.clock += time.delta_secs();
-        let to = eye - tf.translation;
-        let dist = to.length();
-        // Seen: near the center of the view. Away: off the screen's sides (75 degree vertical FOV), so a
-        // move is never visible.
-        let look = (-to).normalize().dot(forward);
-        let seen = tf.translation != HIDDEN && look > 0.8;
-        let away = look < 0.5;
-        let flee = dist < FLEE;
-        let looked_away = w.noticed && away;
-        w.noticed |= seen;
-        if flee || looked_away || (away && w.clock > WANDER_EVERY && level.rng.chance(0.3)) {
+        let w = &mut *w;
+        w.clock += dt;
+        let dist = tf.translation.distance(eye);
+        if !matches!(w.state, State::Gone) && dist < CATCH {
+            w.state = State::Gone;
             w.clock = 0.0;
-            w.noticed = false;
-            let far: Vec<Vec3> = w
-                .spots
-                .iter()
-                .copied()
-                .filter(|s| s.distance(eye) > FAR)
-                .collect();
-            tf.translation = if far.is_empty() {
-                HIDDEN
-            } else {
-                far[level.rng.below(far.len() as u32) as usize]
-            };
-        } else if tf.translation == HIDDEN && w.clock > WANDER_EVERY {
-            w.clock = 0.0;
-            if let Some(&s) = w.spots.iter().find(|s| s.distance(eye) > FAR) {
-                tf.translation = s;
+            tf.translation = HIDDEN;
+            continue;
+        }
+        let seen = !matches!(w.state, State::Gone)
+            && sees(&level, eye, forward, tf.translation + Vec3::Y * HEAD);
+        // Faces the player, or the way it runs (the model looks along local -z).
+        let mut facing = eye - tf.translation;
+        match &mut w.state {
+            State::Watch { seen: s } => {
+                *s = if seen { *s + dt } else { 0.0 };
+                if *s > w.react || dist < FLEE {
+                    w.state = State::Run {
+                        path: w.spots[w.spot].escape.clone(),
+                        next: 0,
+                    };
+                } else if !seen && w.clock > WANDER_EVERY && level.rng.chance(0.3) {
+                    relocate(w, &mut level, &mut tf, eye, forward);
+                }
+            }
+            State::Run { path, next } => {
+                let to = path[*next] - tf.translation;
+                let step = RUN_SPEED * dt;
+                if to.length() <= step {
+                    tf.translation = path[*next];
+                    *next += 1;
+                    if *next == path.len() {
+                        w.state = State::Hide;
+                        w.clock = 0.0;
+                    }
+                } else {
+                    tf.translation += to.normalize() * step;
+                    facing = to;
+                }
+            }
+            State::Hide => {
+                if !seen && w.clock > HIDE_MIN {
+                    relocate(w, &mut level, &mut tf, eye, forward);
+                }
+            }
+            State::Gone => {
+                if w.clock > WANDER_EVERY {
+                    relocate(w, &mut level, &mut tf, eye, forward);
+                }
             }
         }
-        let to = eye - tf.translation;
-        tf.rotation = Quat::from_rotation_y((-to.x).atan2(-to.z));
+        if facing.x != 0.0 || facing.z != 0.0 {
+            tf.rotation = Quat::from_rotation_y((-facing.x).atan2(-facing.z));
+        }
     }
 }

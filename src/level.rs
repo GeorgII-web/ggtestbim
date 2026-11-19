@@ -51,7 +51,7 @@ pub struct Level {
     /// Chunks generated since the cars module last took them, to put cars on their streets.
     pub(crate) new_chunks: Vec<IVec2>,
     /// Watcher spots of the chunks generated since the watchers module last took them.
-    pub(crate) new_spots: Vec<Vec<Vec3>>,
+    pub(crate) new_spots: Vec<Vec<Spot>>,
 }
 
 struct Chunk {
@@ -74,10 +74,59 @@ impl Level {
         v
     }
 
+    /// Whether a level box cuts the segment from `a` to `b` (line of sight). Only the chunks around `b` are
+    /// tested, enough for sight lines up to about 60 m beyond their edge.
+    pub fn blocked(&self, a: Vec3, b: Vec3) -> bool {
+        let (lo, hi, d) = (a.min(b), a.max(b), b - a);
+        self.near(b).iter().any(|boxes| {
+            boxes.iter().any(|bx| {
+                !(bx.max.cmplt(lo).any() || bx.min.cmpgt(hi).any()) && segment_hits(a, d, bx)
+            })
+        })
+    }
+
     /// Whether the ground under `p` exists yet (the player waits for it, cars outside it are removed).
     pub fn loaded(&self, p: Vec3) -> bool {
         self.chunks.contains_key(&chunk_of(p))
     }
+}
+
+/// Slab test: does `a + t * d` for t in 0..1 pass through the box?
+fn segment_hits(a: Vec3, d: Vec3, bx: &Aabb) -> bool {
+    let (mut t0, mut t1) = (0.0f32, 1.0f32);
+    for i in 0..3 {
+        if d[i].abs() < 1e-6 {
+            if a[i] <= bx.min[i] || a[i] >= bx.max[i] {
+                return false;
+            }
+        } else {
+            let (u, v) = ((bx.min[i] - a[i]) / d[i], (bx.max[i] - a[i]) / d[i]);
+            t0 = t0.max(u.min(v));
+            t1 = t1.min(u.max(v));
+            if t0 >= t1 {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// Where a watcher stands (feet), and its escape: the waypoints to a place out of sight nearby.
+#[derive(Clone)]
+pub(crate) struct Spot {
+    pub(crate) pos: Vec3,
+    pub(crate) escape: Vec<Vec3>,
+    pub(crate) kind: SpotKind,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum SpotKind {
+    /// Behind a window; escapes deeper into the room.
+    Window,
+    /// Outside, pressed to a wall at a building corner; escapes around the corner.
+    Corner,
+    /// On the roof at a parapet corner; escapes back from the edge.
+    Roof,
 }
 
 /// Blocks per chunk side, chunk size in meters, chunks kept loaded around the player (square radius),
@@ -690,8 +739,8 @@ struct Builder {
     rng: Rng,
     parts: Vec<(Aabb, Mat)>,
     props: Vec<Prop>,
-    /// Places behind upper-floor windows where a watcher can stand (feet position).
-    spots: Vec<Vec3>,
+    /// Places where a watcher can stand, with their escapes.
+    spots: Vec<Spot>,
     /// Indoor air volumes (inside the outer walls of buildings and covered corridors): faces in them get
     /// the indoor materials.
     rooms: Vec<Aabb>,
@@ -717,7 +766,7 @@ struct Theme {
 
 /// One chunk: ground, road marks, then blocks and passages from a theme picked at random.
 #[allow(clippy::type_complexity)]
-fn generate(seed: u64, chunk: IVec2) -> (Vec<(Aabb, Mat)>, Vec<Prop>, Vec<Vec3>, Vec<Aabb>) {
+fn generate(seed: u64, chunk: IVec2) -> (Vec<(Aabb, Mat)>, Vec<Prop>, Vec<Spot>, Vec<Aabb>) {
     let mut b = Builder {
         rng: Rng(seed),
         parts: Vec::new(),
@@ -783,7 +832,26 @@ fn generate(seed: u64, chunk: IVec2) -> (Vec<(Aabb, Mat)>, Vec<Prop>, Vec<Vec3>,
     for p in &passages {
         b.passage(p);
     }
-    (b.parts, b.props, b.spots, b.rooms)
+    // A watcher spot whose escape runs into a box (a window next to an interior wall) is dropped.
+    let spots = b
+        .spots
+        .into_iter()
+        .filter(|spot| escape_clear(&b.parts, spot))
+        .collect();
+    (b.parts, b.props, spots, b.rooms)
+}
+
+/// From the spot through its waypoints, at knee, waist and head height, no box is in the way.
+fn escape_clear(parts: &[(Aabb, Mat)], spot: &Spot) -> bool {
+    let mut from = spot.pos;
+    spot.escape.iter().all(|&to| {
+        let clear = [0.5, 1.2, 2.3].iter().all(|&h| {
+            let (a, b) = (from + Vec3::Y * h, to + Vec3::Y * h);
+            !parts.iter().any(|(bx, _)| segment_hits(a, b - a, bx))
+        });
+        from = to;
+        clear
+    })
 }
 
 /// Index of a block inside its chunk.
@@ -1134,7 +1202,8 @@ impl Builder {
             max: Vec3::new(ix1, e + bl.floors as f32 * FH, iz1),
         });
         // Watcher spots outside: at each corner on the terrace, pressed to one of the two walls just short of
-        // the edge (peeking around it), and on the roof inside the parapet corners (not the stairwell's).
+        // the edge (peeking around it; escape: around the corner and 2.5 m along the other wall), and on one
+        // random roof corner inside the parapet (not the stairwell's; escape: 3 m back from the edge).
         let top = e + bl.floors as f32 * FH;
         for (cx, cz, sx, sz) in [
             (x0, z0, 1.0, 1.0),
@@ -1142,17 +1211,37 @@ impl Builder {
             (x0, z1, 1.0, -1.0),
             (x1, z1, -1.0, -1.0),
         ] {
-            let spot = if self.rng.chance(0.5) {
-                Vec3::new(cx - sx * 0.35, e, cz + sz * 0.3)
+            let out = Vec3::new(cx - sx * 0.35, e, cz - sz * 0.35);
+            let (pos, around) = if self.rng.chance(0.5) {
+                (
+                    Vec3::new(cx - sx * 0.35, e, cz + sz * 0.3),
+                    Vec3::new(cx + sx * 2.5, e, cz - sz * 0.35),
+                )
             } else {
-                Vec3::new(cx + sx * 0.3, e, cz - sz * 0.35)
+                (
+                    Vec3::new(cx + sx * 0.3, e, cz - sz * 0.35),
+                    Vec3::new(cx - sx * 0.35, e, cz + sz * 2.5),
+                )
             };
-            self.spots.push(spot);
-            if cx != x0 || cz != z0 {
-                self.spots
-                    .push(Vec3::new(cx + sx * (T + 0.5), top, cz + sz * (T + 0.5)));
-            }
+            self.spots.push(Spot {
+                pos,
+                escape: vec![out, around],
+                kind: SpotKind::Corner,
+            });
         }
+        let corner = 1 + self.rng.below(3) as usize;
+        let (cx, cz, sx, sz) = [
+            (x0, z0, 1.0, 1.0),
+            (x1, z0, -1.0, 1.0),
+            (x0, z1, 1.0, -1.0),
+            (x1, z1, -1.0, -1.0),
+        ][corner];
+        let pos = Vec3::new(cx + sx * (T + 0.5), top, cz + sz * (T + 0.5));
+        self.spots.push(Spot {
+            pos,
+            escape: vec![pos + Vec3::new(sx, 0.0, sz) * 3.0],
+            kind: SpotKind::Roof,
+        });
 
         self.add(
             Vec3::new(ix0, e, iz0),
@@ -1189,19 +1278,23 @@ impl Builder {
                     self.openings(u0, u1, doors)
                 };
                 // Watcher spots: 0.35 m inside the windows of every floor (close to the glass, in the light
-                // from the window), away from the stairwell.
+                // from the window), away from the stairwell; escape: 1.8 m deeper into the room.
                 if !roof {
                     for o in ops.iter().filter(|o| o.bottom > 0.0) {
                         let inside = T + 0.35;
-                        let spot = match side {
-                            0 => Vec3::new(o.c, y, z0 + inside),
-                            1 => Vec3::new(o.c, y, z1 - inside),
-                            2 => Vec3::new(x0 + inside, y, o.c),
-                            _ => Vec3::new(x1 - inside, y, o.c),
+                        let (spot, inward) = match side {
+                            0 => (Vec3::new(o.c, y, z0 + inside), Vec3::Z),
+                            1 => (Vec3::new(o.c, y, z1 - inside), -Vec3::Z),
+                            2 => (Vec3::new(x0 + inside, y, o.c), Vec3::X),
+                            _ => (Vec3::new(x1 - inside, y, o.c), -Vec3::X),
                         };
                         let in_stairwell = spot.x < sx1 + 1.0 && spot.z < sz1 + 1.0;
                         if !in_stairwell {
-                            self.spots.push(spot);
+                            self.spots.push(Spot {
+                                pos: spot,
+                                escape: vec![spot + inward * 1.8],
+                                kind: SpotKind::Window,
+                            });
                         }
                     }
                 }
@@ -1556,8 +1649,18 @@ pub(crate) fn test_terrace(e: f32) -> (Vec<Aabb>, Vec<Aabb>) {
 mod tests {
     use super::*;
 
-    /// No two boxes of the level show an overlapping face in the same plane and direction (it flickers):
-    /// a face counts when a point 1 cm in front of the overlap's center lies in no box. Props are left out.
+    /// Every watcher escape runs through free space, and most spots survive the check.
+    #[test]
+    fn watcher_escapes_are_clear() {
+        let mut kept = 0;
+        for s in 0..20u64 {
+            let (parts, _, spots, _) = generate(s * 104_729 + 3, IVec2::new(s as i32, 1));
+            assert!(spots.iter().all(|spot| escape_clear(&parts, spot)));
+            kept += spots.len();
+        }
+        assert!(kept > 20 * 10, "only {kept} spots in 20 chunks");
+    }
+
     #[test]
     fn no_coplanar_visible_faces() {
         for s in 0..20u64 {
