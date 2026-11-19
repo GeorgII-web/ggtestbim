@@ -2,6 +2,8 @@
 //! middle of the screen and the ammo at the bottom right. Left click (with the mouse grabbed) fires one shot
 //! along the view: a short muzzle flash with a flash of light, recoil, and at the hit a bullet mark that
 //! stays `MARK_LIFE` seconds plus a burst of sparks. Hits on cars and props only spark (they move or change).
+//! Each shot leaves the center at a random angle inside a cone: its radius grows with movement (still,
+//! walk, run, in the air) and with each quick follow-up shot (the streak cools down between shots).
 //! `MAGAZINE` rounds; R reloads (the pistol dips out of view and back), an empty magazine only clicks.
 //! While the optic is up the pistol and crosshair are hidden (the optic has its own reticle); shots still
 //! go to the center.
@@ -13,7 +15,7 @@ use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 use crate::cars::CarBoxes;
 use crate::level::{Level, PropBoxes, Rng, ray_box};
 use crate::optic::Optic;
-use crate::player::Player;
+use crate::player::{Motion, Player};
 
 pub struct WeaponPlugin;
 
@@ -25,6 +27,7 @@ impl Plugin for WeaponPlugin {
             recoil: 0.0,
             reload: None,
             flash: 0.0,
+            streak: 0.0,
             rng: Rng(0x5EED_F1E1),
         })
         .add_systems(PostStartup, setup_weapon)
@@ -41,6 +44,14 @@ const MAGAZINE: u32 = 12;
 /// Shortest time between two shots, and the time a reload takes.
 const FIRE_GAP: f32 = 0.12;
 const RELOAD_TIME: f32 = 1.3;
+/// Spread: cone radius in degrees by movement, times a factor for the shot's place in a quick series
+/// (1st, 2nd, 3rd, later). The series count drops by one every `STREAK_COOL` seconds without a shot.
+const SPREAD_STILL: f32 = 0.3;
+const SPREAD_WALK: f32 = 1.2;
+const SPREAD_RUN: f32 = 3.5;
+const SPREAD_AIR: f32 = 5.0;
+const STREAK_FACTOR: [f32; 4] = [1.0, 1.6, 2.3, 3.0];
+const STREAK_COOL: f32 = 0.35;
 /// Longest shot.
 const RANGE: f32 = 150.0;
 /// Bullet marks last this long (the last `MARK_FADE` seconds they shrink away); at most `MAX_MARKS` exist.
@@ -67,6 +78,8 @@ struct Gun {
     reload: Option<f32>,
     /// Seconds of muzzle flash left.
     flash: f32,
+    /// Shots in the current quick series (0 = the next one is a first shot), cooling down over time.
+    streak: f32,
     rng: Rng,
 }
 
@@ -251,7 +264,7 @@ fn fire(
     mouse: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
     cursor: Single<&CursorOptions, With<PrimaryWindow>>,
-    camera: Single<&Transform, With<Player>>,
+    camera: Single<(&Transform, &Player)>,
     level: Res<Level>,
     cars: Res<CarBoxes>,
     props: Res<PropBoxes>,
@@ -260,6 +273,7 @@ fn fire(
 ) {
     let dt = time.delta_secs();
     gun.cooldown -= dt;
+    gun.streak = (gun.streak - dt / STREAK_COOL).max(0.0);
     if let Some(t) = gun.reload.as_mut() {
         *t += dt;
         if *t >= RELOAD_TIME {
@@ -284,8 +298,24 @@ fn fire(
     gun.recoil = 1.0;
     gun.flash = FLASH;
 
+    let (camera, player) = *camera;
+    let base = match player.motion() {
+        Motion::Still => SPREAD_STILL,
+        Motion::Walk => SPREAD_WALK,
+        Motion::Run => SPREAD_RUN,
+        Motion::Air => SPREAD_AIR,
+    };
+    let nth = (gun.streak.ceil() as usize).min(STREAK_FACTOR.len() - 1);
+    let radius = (base * STREAK_FACTOR[nth]).to_radians();
+    gun.streak = (nth + 1) as f32;
+    // Uniform over the cone's disk: angle off center ~ sqrt(u), any direction around it.
+    let off = radius * gun.rng.unit().sqrt();
+    let around = gun.rng.range(0.0, std::f32::consts::TAU);
     let o = camera.translation;
-    let dir = camera.forward().as_vec3();
+    let dir = (camera.forward().as_vec3()
+        + (camera.right().as_vec3() * around.cos() + camera.up().as_vec3() * around.sin())
+            * off.tan())
+    .normalize();
     let world = level.raycast(o, dir, RANGE);
     let moving = cars
         .0

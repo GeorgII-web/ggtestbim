@@ -83,6 +83,30 @@ pub struct Player {
     jump_pressed: f32,
 }
 
+/// How the player moves right now, for the gun's spread.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) enum Motion {
+    Still,
+    Walk,
+    Run,
+    Air,
+}
+
+impl Player {
+    pub(crate) fn motion(&self) -> Motion {
+        let speed = Vec2::new(self.vel.x, self.vel.z).length();
+        if !self.grounded {
+            Motion::Air
+        } else if speed < 0.5 {
+            Motion::Still
+        } else if speed <= WALK + 0.5 {
+            Motion::Walk
+        } else {
+            Motion::Run
+        }
+    }
+}
+
 fn spawn_player(mut commands: Commands) {
     commands.spawn((
         Camera3d::default(),
