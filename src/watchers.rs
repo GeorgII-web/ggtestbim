@@ -1,9 +1,10 @@
-//! Watchers: tall dark figures with a pale face and glowing eyes, standing behind windows, at building
-//! corners or (rarely) on roofs, turned toward the player. When the player really sees one (on screen and
-//! in line of sight) for a moment, or comes within `FLEE`, it runs along its spot's escape (deeper into the
-//! room, around the corner, back from the roof edge) and hides there. Once the player can't see it, it is
-//! gone: it turns up again at another spot of its chunk, far from the player and out of sight.
-//! It can't be caught: closer than `CATCH` it vanishes on the spot. While unseen, it may wander.
+//! Watchers: tall dark figures with a pale face and glowing eyes, standing behind windows, right at
+//! building corners or (rarely) on roofs, turned toward the player. When the player really sees one (on
+//! screen and in line of sight) for a moment, or comes within `FLEE`, it runs along the escape of its spot
+//! that ends out of the player's line of sight (a step aside behind the wall next to a window, around the
+//! corner or back along the wall, back from the roof edge) and hides there. It disappears only while a wall
+//! or object is between it and the player, and turns up again at another spot of its chunk, far from the
+//! player and out of sight. Only if the player gets within `CATCH` does it vanish in view (never caught).
 
 use bevy::prelude::*;
 
@@ -31,16 +32,16 @@ const WEIGHTS: [(SpotKind, f32); 3] = [
 /// Closer than this and the watcher runs; a new spot must be at least `FAR` from the player.
 const FLEE: f32 = 20.0;
 const FAR: f32 = 30.0;
-/// Closer than this it vanishes on the spot, even in plain view.
-const CATCH: f32 = 5.0;
+/// Closer than this it vanishes on the spot, even in plain view (the last resort).
+const CATCH: f32 = 3.0;
 /// Seen this long (random in the range) and it runs.
 const REACT: (f32, f32) = (0.3, 0.9);
-const RUN_SPEED: f32 = 6.0;
+const RUN_SPEED: f32 = 8.0;
 /// Hidden at the end of its escape, it stays at least this long before it can be gone.
 const HIDE_MIN: f32 = 0.6;
 /// Beyond this distance it is too small to count as seen.
 const SEE_DIST: f32 = 120.0;
-/// While unseen, every `WANDER_EVERY` seconds a watcher may move to another spot of its chunk.
+/// While hidden behind something, every `WANDER_EVERY` seconds a watcher may move to another spot.
 const WANDER_EVERY: f32 = 6.0;
 /// Head height above the feet, the target of the line of sight.
 const HEAD: f32 = 2.3;
@@ -213,6 +214,36 @@ fn sees(level: &Level, eye: Vec3, forward: Vec3, p: Vec3) -> bool {
     to.length() < SEE_DIST && to.normalize().dot(forward) > 0.75 && !level.blocked(eye, p)
 }
 
+/// The escape of the spot that ends out of the player's line of sight (the shortest such), else the one
+/// that ends farthest from the player.
+fn choose_escape(level: &Level, eye: Vec3, spot: &Spot) -> Vec<Vec3> {
+    let end = |e: &Vec<Vec3>| e[e.len() - 1];
+    let length = |e: &Vec<Vec3>| {
+        let mut from = spot.pos;
+        e.iter()
+            .map(|&p| {
+                let d = p.distance(from);
+                from = p;
+                d
+            })
+            .sum::<f32>()
+    };
+    let hidden = spot
+        .escapes
+        .iter()
+        .filter(|e| level.blocked(eye, end(e) + Vec3::Y * HEAD))
+        .min_by(|a, b| length(a).total_cmp(&length(b)));
+    hidden
+        .or_else(|| {
+            spot.escapes
+                .iter()
+                .max_by(|a, b| end(a).distance(eye).total_cmp(&end(b).distance(eye)))
+        })
+        .cloned()
+        // Every spot keeps at least one escape (level generation drops the others); stay put otherwise.
+        .unwrap_or_else(|| vec![spot.pos])
+}
+
 /// Puts the watcher at a spot of its chunk far from the player and out of sight, or nowhere if none is free.
 fn relocate(w: &mut Watcher, level: &mut Level, tf: &mut Transform, eye: Vec3, forward: Vec3) {
     let free: Vec<bool> = w
@@ -268,12 +299,15 @@ fn watch(
         match &mut w.state {
             State::Watch { seen: s } => {
                 *s = if seen { *s + dt } else { 0.0 };
+                let head = tf.translation + Vec3::Y * HEAD;
                 if *s > w.react || dist < FLEE {
-                    w.state = State::Run {
-                        path: w.spots[w.spot].escape.clone(),
-                        next: 0,
-                    };
-                } else if !seen && w.clock > WANDER_EVERY && level.rng.chance(0.3) {
+                    let path = choose_escape(&level, eye, &w.spots[w.spot]);
+                    w.state = State::Run { path, next: 0 };
+                } else if !seen
+                    && w.clock > WANDER_EVERY
+                    && level.rng.chance(0.3)
+                    && level.blocked(eye, head)
+                {
                     relocate(w, &mut level, &mut tf, eye, forward);
                 }
             }
@@ -293,7 +327,8 @@ fn watch(
                 }
             }
             State::Hide => {
-                if !seen && w.clock > HIDE_MIN {
+                // Gone only behind cover, never in open view.
+                if w.clock > HIDE_MIN && level.blocked(eye, tf.translation + Vec3::Y * HEAD) {
                     relocate(w, &mut level, &mut tf, eye, forward);
                 }
             }

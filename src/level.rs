@@ -147,19 +147,21 @@ fn segment_hits(a: Vec3, d: Vec3, bx: &Aabb) -> bool {
     true
 }
 
-/// Where a watcher stands (feet), and its escape: the waypoints to a place out of sight nearby.
+/// Where a watcher stands (feet), and its escapes: each a list of waypoints to a place out of sight from
+/// some side; the watcher picks the one that ends hidden from the player.
 #[derive(Clone)]
 pub(crate) struct Spot {
     pub(crate) pos: Vec3,
-    pub(crate) escape: Vec<Vec3>,
+    pub(crate) escapes: Vec<Vec<Vec3>>,
     pub(crate) kind: SpotKind,
 }
 
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum SpotKind {
-    /// Behind a window; escapes deeper into the room.
+    /// Behind a window; escapes: a step aside behind the wall next to the window, or deeper into the room.
     Window,
-    /// Outside, pressed to a wall at a building corner; escapes around the corner.
+    /// Outside, pressed to a wall right at a building corner; escapes: around the corner, or back along
+    /// its wall (hidden from the other side).
     Corner,
     /// On the roof at a parapet corner; escapes back from the edge.
     Roof,
@@ -868,19 +870,23 @@ fn generate(seed: u64, chunk: IVec2) -> (Vec<(Aabb, Mat)>, Vec<Prop>, Vec<Spot>,
     for p in &passages {
         b.passage(p);
     }
-    // A watcher spot whose escape runs into a box (a window next to an interior wall) is dropped.
+    // Escapes that run into a box (a window next to an interior wall) are dropped, and spots left without one.
     let spots = b
         .spots
         .into_iter()
-        .filter(|spot| escape_clear(&b.parts, spot))
+        .filter_map(|mut spot| {
+            let pos = spot.pos;
+            spot.escapes.retain(|e| escape_clear(&b.parts, pos, e));
+            (!spot.escapes.is_empty()).then_some(spot)
+        })
         .collect();
     (b.parts, b.props, spots, b.rooms)
 }
 
-/// From the spot through its waypoints, at knee, waist and head height, no box is in the way.
-fn escape_clear(parts: &[(Aabb, Mat)], spot: &Spot) -> bool {
-    let mut from = spot.pos;
-    spot.escape.iter().all(|&to| {
+/// From `pos` through the waypoints, at knee, waist and head height, no box is in the way.
+fn escape_clear(parts: &[(Aabb, Mat)], pos: Vec3, escape: &[Vec3]) -> bool {
+    let mut from = pos;
+    escape.iter().all(|&to| {
         let clear = [0.5, 1.2, 2.3].iter().all(|&h| {
             let (a, b) = (from + Vec3::Y * h, to + Vec3::Y * h);
             !parts.iter().any(|(bx, _)| segment_hits(a, b - a, bx))
@@ -1237,9 +1243,10 @@ impl Builder {
             min: Vec3::new(ix0, e, iz0),
             max: Vec3::new(ix1, e + bl.floors as f32 * FH, iz1),
         });
-        // Watcher spots outside: at each corner on the terrace, pressed to one of the two walls just short of
-        // the edge (peeking around it; escape: around the corner and 2.5 m along the other wall), and on one
-        // random roof corner inside the parapet (not the stairwell's; escape: 3 m back from the edge).
+        // Watcher spots outside: at each corner on the terrace, pressed to one of the two walls right at the
+        // edge (peeking around it; escapes: around the corner 1.5 m along the other wall, or 1.8 m back along
+        // its own), and on one random roof corner inside the parapet (not the stairwell's; escape: 3 m back
+        // from the edge).
         let top = e + bl.floors as f32 * FH;
         for (cx, cz, sx, sz) in [
             (x0, z0, 1.0, 1.0),
@@ -1248,20 +1255,22 @@ impl Builder {
             (x1, z1, -1.0, -1.0),
         ] {
             let out = Vec3::new(cx - sx * 0.35, e, cz - sz * 0.35);
-            let (pos, around) = if self.rng.chance(0.5) {
+            let (pos, around, back) = if self.rng.chance(0.5) {
                 (
-                    Vec3::new(cx - sx * 0.35, e, cz + sz * 0.3),
-                    Vec3::new(cx + sx * 2.5, e, cz - sz * 0.35),
+                    Vec3::new(cx - sx * 0.35, e, cz + sz * 0.25),
+                    Vec3::new(cx + sx * 1.5, e, cz - sz * 0.35),
+                    Vec3::new(cx - sx * 0.35, e, cz + sz * 1.8),
                 )
             } else {
                 (
-                    Vec3::new(cx + sx * 0.3, e, cz - sz * 0.35),
-                    Vec3::new(cx - sx * 0.35, e, cz + sz * 2.5),
+                    Vec3::new(cx + sx * 0.25, e, cz - sz * 0.35),
+                    Vec3::new(cx - sx * 0.35, e, cz + sz * 1.5),
+                    Vec3::new(cx + sx * 1.8, e, cz - sz * 0.35),
                 )
             };
             self.spots.push(Spot {
                 pos,
-                escape: vec![out, around],
+                escapes: vec![vec![out, around], vec![back]],
                 kind: SpotKind::Corner,
             });
         }
@@ -1275,7 +1284,7 @@ impl Builder {
         let pos = Vec3::new(cx + sx * (T + 0.5), top, cz + sz * (T + 0.5));
         self.spots.push(Spot {
             pos,
-            escape: vec![pos + Vec3::new(sx, 0.0, sz) * 3.0],
+            escapes: vec![vec![pos + Vec3::new(sx, 0.0, sz) * 3.0]],
             kind: SpotKind::Roof,
         });
 
@@ -1314,7 +1323,8 @@ impl Builder {
                     self.openings(u0, u1, doors)
                 };
                 // Watcher spots: 0.35 m inside the windows of every floor (close to the glass, in the light
-                // from the window), away from the stairwell; escape: 1.8 m deeper into the room.
+                // from the window), away from the stairwell; escapes: a step to either side behind the wall,
+                // or 1.8 m deeper into the room.
                 if !roof {
                     for o in ops.iter().filter(|o| o.bottom > 0.0) {
                         let inside = T + 0.35;
@@ -1324,11 +1334,17 @@ impl Builder {
                             2 => (Vec3::new(x0 + inside, y, o.c), Vec3::X),
                             _ => (Vec3::new(x1 - inside, y, o.c), -Vec3::X),
                         };
+                        let along = if along_x { Vec3::X } else { Vec3::Z };
+                        let aside = along * (o.w / 2.0 + 0.45);
                         let in_stairwell = spot.x < sx1 + 1.0 && spot.z < sz1 + 1.0;
                         if !in_stairwell {
                             self.spots.push(Spot {
                                 pos: spot,
-                                escape: vec![spot + inward * 1.8],
+                                escapes: vec![
+                                    vec![spot + aside],
+                                    vec![spot - aside],
+                                    vec![spot + inward * 1.8],
+                                ],
                                 kind: SpotKind::Window,
                             });
                         }
@@ -1707,7 +1723,13 @@ mod tests {
         let mut kept = 0;
         for s in 0..20u64 {
             let (parts, _, spots, _) = generate(s * 104_729 + 3, IVec2::new(s as i32, 1));
-            assert!(spots.iter().all(|spot| escape_clear(&parts, spot)));
+            assert!(spots.iter().all(|spot| {
+                !spot.escapes.is_empty()
+                    && spot
+                        .escapes
+                        .iter()
+                        .all(|e| escape_clear(&parts, spot.pos, e))
+            }));
             kept += spots.len();
         }
         assert!(kept > 20 * 10, "only {kept} spots in 20 chunks");
