@@ -88,7 +88,7 @@ pub fn image(tex: Tex, seed: u32) -> Image {
         mag_filter: ImageFilterMode::Linear,
         min_filter: ImageFilterMode::Linear,
         mipmap_filter: ImageFilterMode::Linear,
-        anisotropy_clamp: 16,
+        anisotropy_clamp: 4,
         ..Default::default()
     });
     image

@@ -29,6 +29,13 @@ step-up); stair flights never lie inside another flight's head room (switchback 
   tests: `scripts/cargo-gnu.sh test --no-run`, copy the printed test exe to a Windows folder (`C:\dev\ggtestbim-test`)
   and run it there (Linux can't build Bevy here; the exe needs Windows).
 
+## Performance
+
+The target machine has an integrated Intel Iris Xe GPU (Vulkan): the cost is per pixel, not geometry (a chunk is ~730
+boxes). MSAA is off, shadows are 2 cascades to 50 m on a 1024 map with the `Hardware2x2` filter, textures use 4×
+anisotropy, 5×5 chunks are loaded with fog at 45–115 m; that measured 50–65 fps (vsync 60), against ~22 fps with
+MSAA 4×, 3–4 cascades and 7×7 chunks. G toggles shadows in game; the HUD shows fps. Measure before raising any of these.
+
 ## Rules
 
 - Work and temp files go to the git-ignored `var/`, never the repo root.

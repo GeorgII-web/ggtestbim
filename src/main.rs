@@ -13,7 +13,7 @@ use bevy::light::{CascadeShadowConfigBuilder, DirectionalLightShadowMap};
 use bevy::prelude::*;
 
 const HELP: &str = "WASD move (runs) | Shift walk | Ctrl crouch | Space jump | mouse look
-Crouch + jump into windows | Click grab mouse | Esc release | R new world";
+Crouch + jump into windows | Click grab mouse | Esc release | R new world | G shadows";
 
 fn main() {
     App::new()
@@ -37,9 +37,10 @@ fn main() {
             clouds::CloudsPlugin,
             hud::HudPlugin,
         ))
-        // Sharp shadows near the player: a bigger shadow map split into cascades that are dense up close.
-        .insert_resource(DirectionalLightShadowMap { size: 2048 })
+        // Shadows only near the player (2 cascades to 50 m, 1024 map): cheap enough for an integrated GPU.
+        .insert_resource(DirectionalLightShadowMap { size: 1024 })
         .add_systems(Startup, setup)
+        .add_systems(Update, toggle_shadows)
         .run();
 }
 
@@ -52,9 +53,9 @@ fn setup(mut commands: Commands) {
         },
         Transform::from_xyz(30.0, 60.0, 20.0).looking_at(Vec3::ZERO, Vec3::Y),
         CascadeShadowConfigBuilder {
-            num_cascades: 3,
-            first_cascade_far_bound: 12.0,
-            maximum_distance: 90.0,
+            num_cascades: 2,
+            first_cascade_far_bound: 15.0,
+            maximum_distance: 50.0,
             ..default()
         }
         .build(),
@@ -68,4 +69,11 @@ fn setup(mut commands: Commands) {
             ..default()
         },
     ));
+}
+
+/// G switches the sun's shadows off and on (the biggest GPU cost).
+fn toggle_shadows(keys: Res<ButtonInput<KeyCode>>, mut sun: Single<&mut DirectionalLight>) {
+    if keys.just_pressed(KeyCode::KeyG) {
+        sun.shadow_maps_enabled = !sun.shadow_maps_enabled;
+    }
 }

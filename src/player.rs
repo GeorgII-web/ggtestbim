@@ -76,6 +76,9 @@ pub struct Player {
 fn spawn_player(mut commands: Commands) {
     commands.spawn((
         Camera3d::default(),
+        // No MSAA and the cheapest shadow filter: the target is an integrated laptop GPU (Iris Xe).
+        Msaa::Off,
+        bevy::light::ShadowFilteringMethod::Hardware2x2,
         Projection::Perspective(PerspectiveProjection {
             fov: 75f32.to_radians(),
             ..default()
