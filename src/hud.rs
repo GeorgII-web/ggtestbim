@@ -1,6 +1,6 @@
 //! Top line of the screen: "~ help" on the left (~ unfolds the controls under it), the compass in the center
 //! (a strip of 15 degree ticks with N/E/S/W around the view direction, a marker under the middle, the heading
-//! in degrees; north is -z, headings grow clockwise) and the frame rate on the right.
+//! in degrees right of the strip; north is -z, headings grow clockwise) and the frame rate on the right.
 
 use bevy::prelude::*;
 
@@ -87,7 +87,8 @@ fn setup_compass(mut commands: Commands) {
                     font_size: FontSize::Px(18.0),
                     ..default()
                 },
-                TextLayout::justify(Justify::Center),
+                // Left-justified so the marker line lines up with the strip above it.
+                TextLayout::justify(Justify::Left),
                 Compass,
             ));
         });
@@ -121,6 +122,12 @@ fn compass(
         "  ".repeat(HALF as usize),
         "  ".repeat(HALF as usize)
     );
-    text.0 = format!("{}\n{}\n{:03.0}", strip.join(" "), marker, heading);
+    // Five spaces in front balance the "  297" behind, so the strip stays centered on the screen.
+    text.0 = format!(
+        "     {}  {:03.0}\n     {}",
+        strip.join(" "),
+        heading,
+        marker
+    );
     fps_text.0 = format!("{:.0} fps", *fps);
 }
