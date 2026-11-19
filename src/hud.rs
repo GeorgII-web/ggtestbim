@@ -23,7 +23,7 @@ const HELP_HINT: &str = "~ help";
 const HELP: &str = "~ help
 WASD move (runs) | Shift walk | Ctrl crouch | Space jump | mouse look
 Ctrl + Space high jump (ledges, windows) | Right click optic, wheel zoom | Click grab mouse | Esc release
-Left click shoot | R reload | N new world | G shadows";
+Left click shoot | R reload | N new world | G shadows | F render scale";
 
 #[derive(Component)]
 struct Compass;
@@ -108,6 +108,7 @@ fn setup_compass(mut commands: Commands) {
         });
 }
 
+#[allow(clippy::too_many_arguments)]
 fn compass(
     time: Res<Time>,
     mut fps: Local<f32>,
@@ -116,6 +117,7 @@ fn compass(
     mut south: Single<&mut TextSpan, (With<CompassSouth>, Without<CompassRest>)>,
     mut rest: Single<&mut TextSpan, (With<CompassRest>, Without<CompassSouth>)>,
     mut fps_text: Single<&mut Text, (With<Fps>, Without<Compass>)>,
+    scale: Option<Res<crate::render_scale::RenderScale>>,
 ) {
     // Frames per second, smoothed over about half a second.
     let dt = time.delta_secs().max(1e-4);
@@ -153,5 +155,7 @@ fn compass(
     text.0 = head.into();
     south.0 = s.into();
     rest.0 = tail.into();
-    fps_text.0 = format!("{:.0} fps", *fps);
+    // The render scale (F) next to the frame rate.
+    let pct = scale.map_or(100.0, |s| s.scale() * 100.0);
+    fps_text.0 = format!("{pct:.0}%  {:.0} fps", *fps);
 }
