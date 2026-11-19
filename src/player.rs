@@ -30,6 +30,9 @@ const AIR_ACCEL: f32 = 4.0;
 /// Short, heavy jump: apex 0.94 m, 0.5 s in the air. Enough for a crouched body to reach a 1.0 m
 /// window sill with the air step-up (feet above sill - STEP).
 const JUMP: f32 = 7.5;
+/// Crouched (Ctrl held) the jump is higher: apex 1.12 m, so with the air step-up the feet reach a 1.5 m
+/// terrace ledge (1.5 - STEP = 0.95 m), and the crouched body still fits a window (sill 1.0 + 1.12 + 0.9 < 2.3).
+const CROUCH_JUMP: f32 = 8.2;
 const GRAVITY: f32 = 30.0;
 /// A jump still works this long after leaving the ground (coyote time), and a press this long before
 /// landing is kept until the landing (jump buffer); jumping while running at full speed stays reliable.
@@ -238,7 +241,7 @@ fn walk(
     };
     let held = keys.pressed(KeyCode::Space) && p.grounded;
     if (p.jump_pressed <= JUMP_GRACE || held) && p.air_time <= JUMP_GRACE && p.vel.y <= 0.0 {
-        p.vel.y = JUMP;
+        p.vel.y = if crouched { CROUCH_JUMP } else { JUMP };
         p.grounded = false;
         p.air_time = JUMP_GRACE + 1.0;
         p.jump_pressed = f32::MAX;
@@ -470,9 +473,26 @@ mod tests {
         let near = [&boxes[..]];
         let mut p = player_at(Vec3::new(-0.6, 0.0, 0.0));
         p.height = CROUCH;
-        p.vel.y = JUMP;
+        p.vel.y = CROUCH_JUMP;
         p.grounded = false;
         walk_to(&mut p, &near, Vec2::new(2.0, 0.0), 3.0);
         assert!(p.pos.x > 1.5, "stuck at {:?}", p.pos);
+    }
+
+    /// Crouched, jump at a 1.5 m terrace ledge and walk on: up onto it.
+    #[test]
+    fn crouch_jumps_onto_a_terrace_ledge() {
+        let b = |min: Vec3, max: Vec3| Aabb { min, max };
+        let boxes = [
+            b(Vec3::new(-10.0, -1.0, -10.0), Vec3::new(10.0, 0.0, 10.0)),
+            b(Vec3::new(0.0, 0.0, -10.0), Vec3::new(10.0, 1.5, 10.0)),
+        ];
+        let near = [&boxes[..]];
+        let mut p = player_at(Vec3::new(-0.4, 0.0, 0.0));
+        p.height = CROUCH;
+        p.vel.y = CROUCH_JUMP;
+        p.grounded = false;
+        walk_to(&mut p, &near, Vec2::new(2.0, 0.0), 3.0);
+        assert!(p.pos.x > 1.5 && p.pos.y > 1.4, "stuck at {:?}", p.pos);
     }
 }
