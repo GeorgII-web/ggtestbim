@@ -1,4 +1,4 @@
-//! Watchers: tall dark figures with glowing eyes standing behind windows, at building corners or on roofs,
+//! Watchers: tall dark figures with a pale face and glowing eyes standing behind windows, at building corners or on roofs,
 //! always turned toward the player. They can't be caught: come within `FLEE` and the watcher is gone, to a
 //! spot far away (or nowhere); once seen, it moves the moment the player looks away, and while unseen it
 //! may wander to another spot of its chunk.
@@ -18,8 +18,8 @@ impl Plugin for WatchersPlugin {
 }
 
 /// Chance of each of the (up to) `PER_CHUNK` watchers of a new chunk with spots.
-const CHANCE: f32 = 0.8;
-const PER_CHUNK: usize = 2;
+const CHANCE: f32 = 0.9;
+const PER_CHUNK: usize = 4;
 /// Closer than this and the watcher moves away; a new spot must be at least `FAR` from the player.
 const FLEE: f32 = 20.0;
 const FAR: f32 = 30.0;
@@ -39,6 +39,8 @@ struct Watcher {
 struct WatcherAssets {
     cube: Handle<Mesh>,
     body: Handle<StandardMaterial>,
+    /// Pale, faintly glowing head: it shows in the dark rooms (15 % ambient) where the black body doesn't.
+    face: Handle<StandardMaterial>,
     eyes: Handle<StandardMaterial>,
 }
 
@@ -51,6 +53,12 @@ fn setup_watchers(
         cube: meshes.add(Cuboid::new(1.0, 1.0, 1.0)),
         body: materials.add(StandardMaterial {
             base_color: Color::srgb(0.03, 0.03, 0.04),
+            perceptual_roughness: 1.0,
+            ..default()
+        }),
+        face: materials.add(StandardMaterial {
+            base_color: Color::srgb(0.78, 0.76, 0.72),
+            emissive: LinearRgba::rgb(0.25, 0.24, 0.22),
             perceptual_roughness: 1.0,
             ..default()
         }),
@@ -100,7 +108,7 @@ fn spawn_watcher(commands: &mut Commands, assets: &WatcherAssets, at: Vec3, spot
             Transform::from_translation(center).with_scale(size),
         )
     };
-    // Modeled facing local -z: thin body, long neck, head, two eyes on the front.
+    // Modeled facing local -z: thin body, long neck, pale head, two eyes on the front.
     commands
         .spawn((
             Transform::from_translation(at),
@@ -120,12 +128,12 @@ fn spawn_watcher(commands: &mut Commands, assets: &WatcherAssets, at: Vec3, spot
             c.spawn(part(
                 Vec3::new(0.0, 2.35, 0.0),
                 Vec3::new(0.32, 0.4, 0.32),
-                &assets.body,
+                &assets.face,
             ));
             for x in [-0.08, 0.08] {
                 c.spawn(part(
                     Vec3::new(x, 2.4, -0.17),
-                    Vec3::new(0.1, 0.07, 0.02),
+                    Vec3::new(0.11, 0.08, 0.02),
                     &assets.eyes,
                 ));
             }

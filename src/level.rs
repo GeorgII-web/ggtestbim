@@ -1188,10 +1188,11 @@ impl Builder {
                 } else {
                     self.openings(u0, u1, doors)
                 };
-                // Watcher spots: 0.6 m inside the windows of every floor, away from the stairwell.
+                // Watcher spots: 0.35 m inside the windows of every floor (close to the glass, in the light
+                // from the window), away from the stairwell.
                 if !roof {
                     for o in ops.iter().filter(|o| o.bottom > 0.0) {
-                        let inside = T + 0.6;
+                        let inside = T + 0.35;
                         let spot = match side {
                             0 => Vec3::new(o.c, y, z0 + inside),
                             1 => Vec3::new(o.c, y, z1 - inside),
