@@ -4,10 +4,13 @@
 //! bridges between roofs, with stairs where the heights differ.
 //! Everything is an axis-aligned box: the list is the collision world of the player, and the boxes of each
 //! material are merged into one mesh with world-space UVs, so textures tile at a fixed size in meters.
+//! Faces inside a building or covered corridor get an indoor copy of their material that lets in only
+//! `INDOOR_AMBIENT` of the sky's ambient light: rooms are lit by the sun through windows and doors.
 
 use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
+use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use std::collections::HashMap;
 
 use crate::player::Player;
@@ -176,6 +179,8 @@ fn fixed_look(i: usize) -> ([f32; 3], Tex, f32, f32) {
 #[derive(Resource)]
 struct Palette {
     mats: Vec<Handle<StandardMaterial>>,
+    /// The same materials for faces inside buildings: ambient light cut to `INDOOR_AMBIENT`.
+    indoor: Vec<Handle<StandardMaterial>>,
     /// Texture tile size in meters per material index.
     scales: Vec<f32>,
     /// Unit cube for props, scaled per part.
@@ -239,6 +244,27 @@ fn setup_palette(
         scales.push(scale);
     }
     let leaves = texture(Tex::Leaves, 0);
+    // A 1x1 occlusion map: the shader multiplies only ambient (indirect) light by it, so the sun through a
+    // window still lights a room fully while the rest of it stays in shade.
+    let shade = images.add(Image::new_fill(
+        Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        &[(INDOOR_AMBIENT * 255.0) as u8],
+        TextureFormat::R8Unorm,
+        RenderAssetUsages::default(),
+    ));
+    let indoor = mats
+        .iter()
+        .map(|m| {
+            let mut mat = materials.get(m).expect("material just added").clone();
+            mat.occlusion_texture = Some(shade.clone());
+            materials.add(mat)
+        })
+        .collect();
     let crazy = [
         (0.85, 0.2, 0.15),
         (0.55, 0.25, 0.75),
@@ -259,6 +285,7 @@ fn setup_palette(
     .collect();
     commands.insert_resource(Palette {
         mats,
+        indoor,
         scales,
         cube: meshes.add(Cuboid::new(1.0, 1.0, 1.0)),
         crazy,
@@ -329,26 +356,30 @@ fn stream(
     missing.sort_by_key(|&c| (c - center).length_squared());
     for c in missing.into_iter().take(max_loads) {
         let seed = level.rng.next();
-        let (parts, props, spots) = generate(seed, c);
+        let (parts, props, spots, rooms) = generate(seed, c);
         let mut groups: Vec<Vec<Aabb>> = vec![Vec::new(); MATS];
         for (b, mat) in &parts {
             groups[mat.index()].push(*b);
         }
-        let mut entities: Vec<Entity> = groups
-            .iter()
-            .enumerate()
-            .filter(|(_, boxes)| !boxes.is_empty())
-            .map(|(i, boxes)| {
-                let scale = palette.scales[i];
-                commands
-                    .spawn((
-                        Mesh3d(meshes.add(box_mesh(boxes, scale))),
-                        MeshMaterial3d(palette.mats[i].clone()),
-                        LevelPart,
-                    ))
-                    .id()
-            })
-            .collect();
+        let mut entities: Vec<Entity> = Vec::new();
+        for (i, boxes) in groups.iter().enumerate().filter(|(_, b)| !b.is_empty()) {
+            let scale = palette.scales[i];
+            for (inside, mats) in [(false, &palette.mats), (true, &palette.indoor)] {
+                let Some(mesh) = box_mesh(boxes, scale, |face| indoor(&rooms, face) == inside)
+                else {
+                    continue;
+                };
+                entities.push(
+                    commands
+                        .spawn((
+                            Mesh3d(meshes.add(mesh)),
+                            MeshMaterial3d(mats[i].clone()),
+                            LevelPart,
+                        ))
+                        .id(),
+                );
+            }
+        }
         for prop in props {
             let children: Vec<Entity> = prop
                 .parts
@@ -494,8 +525,20 @@ fn haunt(
     }
 }
 
-/// All boxes of one material as a single mesh; UVs are world coordinates divided by the texture tile size.
-fn box_mesh(boxes: &[Aabb], scale: f32) -> Mesh {
+/// Share of the sky's ambient light that reaches faces inside buildings.
+const INDOOR_AMBIENT: f32 = 0.15;
+
+/// True when a face (a point just in front of its center) lies in one of the indoor volumes.
+fn indoor(rooms: &[Aabb], p: Vec3) -> bool {
+    rooms
+        .iter()
+        .any(|r| p.cmpgt(r.min).all() && p.cmplt(r.max).all())
+}
+
+/// The faces of all boxes of one material that `keep` accepts (it gets a point 5 cm in front of the face
+/// center) as a single mesh, or None when no face is kept; UVs are world coordinates divided by the texture
+/// tile size.
+fn box_mesh(boxes: &[Aabb], scale: f32, keep: impl Fn(Vec3) -> bool) -> Option<Mesh> {
     let mut positions = Vec::with_capacity(boxes.len() * 24);
     let mut normals = Vec::with_capacity(boxes.len() * 24);
     let mut uvs = Vec::with_capacity(boxes.len() * 24);
@@ -507,6 +550,12 @@ fn box_mesh(boxes: &[Aabb], scale: f32) -> Mesh {
             for positive in [false, true] {
                 let mut n = [0.0; 3];
                 n[a] = if positive { 1.0 } else { -1.0 };
+                if !keep(
+                    (b.min + b.max) / 2.0
+                        + Vec3::from_array(n) * ((b.max[a] - b.min[a]) / 2.0 + 0.05),
+                ) {
+                    continue;
+                }
                 let base = positions.len() as u32;
                 for (hb, hc) in [(false, false), (true, false), (true, true), (false, true)] {
                     let mut p = Vec3::ZERO;
@@ -531,14 +580,19 @@ fn box_mesh(boxes: &[Aabb], scale: f32) -> Mesh {
             }
         }
     }
-    Mesh::new(
-        PrimitiveTopology::TriangleList,
-        RenderAssetUsages::default(),
+    if indices.is_empty() {
+        return None;
+    }
+    Some(
+        Mesh::new(
+            PrimitiveTopology::TriangleList,
+            RenderAssetUsages::default(),
+        )
+        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
+        .with_inserted_indices(Indices::U32(indices)),
     )
-    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
-    .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
-    .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
-    .with_inserted_indices(Indices::U32(indices))
 }
 
 /// SplitMix64: small, seedable, no dependency.
@@ -638,6 +692,9 @@ struct Builder {
     props: Vec<Prop>,
     /// Places behind upper-floor windows where a watcher can stand (feet position).
     spots: Vec<Vec3>,
+    /// Indoor air volumes (inside the outer walls of buildings and covered corridors): faces in them get
+    /// the indoor materials.
+    rooms: Vec<Aabb>,
 }
 
 /// A movable object (tree, bench): its own entity, so it can change while the player looks away.
@@ -659,12 +716,14 @@ struct Theme {
 }
 
 /// One chunk: ground, road marks, then blocks and passages from a theme picked at random.
-fn generate(seed: u64, chunk: IVec2) -> (Vec<(Aabb, Mat)>, Vec<Prop>, Vec<Vec3>) {
+#[allow(clippy::type_complexity)]
+fn generate(seed: u64, chunk: IVec2) -> (Vec<(Aabb, Mat)>, Vec<Prop>, Vec<Vec3>, Vec<Aabb>) {
     let mut b = Builder {
         rng: Rng(seed),
         parts: Vec::new(),
         props: Vec::new(),
         spots: Vec::new(),
+        rooms: Vec::new(),
     };
     let origin = chunk.as_vec2() * CHUNK_SIZE;
     b.add(
@@ -724,7 +783,7 @@ fn generate(seed: u64, chunk: IVec2) -> (Vec<(Aabb, Mat)>, Vec<Prop>, Vec<Vec3>)
     for p in &passages {
         b.passage(p);
     }
-    (b.parts, b.props, b.spots)
+    (b.parts, b.props, b.spots, b.rooms)
 }
 
 /// Index of a block inside its chunk.
@@ -1069,6 +1128,11 @@ impl Builder {
         let sz1 = stair_z1(z0);
         let (ix0, iz0, ix1, iz1) = (x0 + T, z0 + T, x1 - T, z1 - T);
         let door_side = self.rng.below(4);
+        // Indoors from the ground floor up to the roof slab's top (the roof's upper face is outdoors).
+        self.rooms.push(Aabb {
+            min: Vec3::new(ix0, e, iz0),
+            max: Vec3::new(ix1, e + bl.floors as f32 * FH, iz1),
+        });
 
         self.add(
             Vec3::new(ix0, e, iz0),
@@ -1219,6 +1283,18 @@ impl Builder {
                     self.add_uv(p.along_x, u0, u1, w0, w1, y + 2.1, y + 2.8, Mat::Stone);
                 }
                 self.add_uv(p.along_x, u0, u1, v0, v1, y + 2.8, y + 3.0, Mat::Metal);
+                let (a, b) = (v0 + 0.2, v1 - 0.2);
+                self.rooms.push(if p.along_x {
+                    Aabb {
+                        min: Vec3::new(u0, y - 0.3, a),
+                        max: Vec3::new(u1, y + 2.8, b),
+                    }
+                } else {
+                    Aabb {
+                        min: Vec3::new(a, y - 0.3, u0),
+                        max: Vec3::new(b, y + 2.8, u1),
+                    }
+                });
             } else {
                 for (w0, w1) in [(v0, v0 + 0.08), (v1 - 0.08, v1)] {
                     self.add_uv(p.along_x, u0, u1, w0, w1, y, y + 1.0, Mat::Metal);
@@ -1395,6 +1471,7 @@ pub(crate) fn test_building(floors: u32) -> Vec<Aabb> {
         parts: Vec::new(),
         props: Vec::new(),
         spots: Vec::new(),
+        rooms: Vec::new(),
     };
     b.add(
         Vec3::new(-20.0, -1.0, -20.0),
@@ -1425,6 +1502,7 @@ pub(crate) fn test_terrace(e: f32) -> (Vec<Aabb>, Vec<Aabb>) {
         parts: Vec::new(),
         props: Vec::new(),
         spots: Vec::new(),
+        rooms: Vec::new(),
     };
     b.add(
         Vec3::new(-20.0, -1.0, -20.0),
