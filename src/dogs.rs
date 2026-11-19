@@ -45,6 +45,9 @@ const DROP: f32 = 3.0;
 /// Eye height of a dog, for its line of sight.
 const EYE: f32 = 0.6;
 const SIGHT_EVERY: f32 = 0.2;
+/// A paw sound every this many meters, walking and running.
+const PAW_STRIDE_WALK: f32 = 0.45;
+const PAW_STRIDE_RUN: f32 = 0.8;
 
 #[derive(Resource)]
 struct DogRng(Rng);
@@ -76,6 +79,8 @@ struct Dog {
     sees: bool,
     /// Gait phase for the legs.
     gait: f32,
+    /// Meters since the last paw sound.
+    walked: f32,
 }
 
 #[derive(Component)]
@@ -190,6 +195,7 @@ fn spawn_dog(commands: &mut Commands, assets: &DogAssets, at: Vec3, heading: f32
                 sight_in: 0.0,
                 sees: false,
                 gait: 0.0,
+                walked: 0.0,
             },
             Shootable {
                 kind: Kind::Dog,
@@ -384,9 +390,19 @@ fn run_dogs(
             let to = feet - pos;
             tf.rotation = Quat::from_rotation_y((-to.x).atan2(-to.z));
         }
-        // Legs swing in a trot, faster when running.
+        // Legs swing in a trot, faster when running; a paw pat every stride (longer when running).
         if moving {
             dog.gait += dt * speed * 4.0;
+            dog.walked += speed * dt;
+            let (stride, volume) = if speed > WANDER_SPEED {
+                (PAW_STRIDE_RUN, 0.5)
+            } else {
+                (PAW_STRIDE_WALK, 0.25)
+            };
+            if dog.walked >= stride {
+                dog.walked -= stride;
+                sound.play(Sfx::Paw, Some(tf.translation), volume);
+            }
         }
         for c in children.iter() {
             if let Ok((leg, mut ltf)) = legs.get_mut(c) {

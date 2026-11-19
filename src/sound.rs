@@ -97,6 +97,7 @@ pub enum Sfx {
     Hit,
     Kill,
     Bark,
+    Paw,
     Bite,
     Yelp,
     Hurt,
@@ -122,6 +123,7 @@ struct Sounds {
     reload: Handle<Synth>,
     kill: Handle<Synth>,
     barks: Vec<Handle<Synth>>,
+    paws: Vec<Handle<Synth>>,
     bite: Handle<Synth>,
     yelp: Handle<Synth>,
     hurt: Handle<Synth>,
@@ -151,6 +153,7 @@ fn setup_sounds(mut commands: Commands, mut synths: ResMut<Assets<Synth>>) {
         reload: add(reload()),
         kill: add(kill()),
         barks: (0..3).map(|i| add(bark(i))).collect(),
+        paws: (0..3).map(|i| add(paw(i))).collect(),
         bite: add(bite()),
         yelp: add(yelp()),
         hurt: add(hurt()),
@@ -179,6 +182,7 @@ fn play_queue(mut commands: Commands, mut queue: ResMut<SoundQueue>, mut sounds:
             Sfx::Reload => sounds.reload.clone(),
             Sfx::Kill => sounds.kill.clone(),
             Sfx::Bark => pick(&sounds.barks, rng),
+            Sfx::Paw => pick(&sounds.paws, rng),
             Sfx::Bite => sounds.bite.clone(),
             Sfx::Yelp => sounds.yelp.clone(),
             Sfx::Hurt => sounds.hurt.clone(),
@@ -210,14 +214,14 @@ fn footsteps(
 ) {
     let motion = player.motion();
     if *last == Some(Motion::Air) && motion != Motion::Air {
-        queue.play(Sfx::Step, None, 0.8);
+        queue.play(Sfx::Step, None, 0.3);
         *walked = 0.0;
     }
     *last = Some(motion);
     let (stride, volume) = match motion {
-        Motion::Walk if player.crouched() => (STRIDE_WALK, 0.12),
-        Motion::Walk => (STRIDE_WALK, 0.3),
-        Motion::Run => (STRIDE_RUN, 0.5),
+        Motion::Walk if player.crouched() => (STRIDE_WALK, 0.04),
+        Motion::Walk => (STRIDE_WALK, 0.1),
+        Motion::Run => (STRIDE_RUN, 0.18),
         Motion::Still | Motion::Air => return,
     };
     *walked += player.ground_speed() * time.delta_secs();
@@ -429,6 +433,23 @@ fn bark(variant: u64) -> Vec<f32> {
         .collect()
 }
 
+/// A dog's paw on the ground: a short soft pat with a tiny scratch of claws; variants differ in tone.
+fn paw(variant: u64) -> Vec<f32> {
+    let mut rng = Rng(0x9A3 + variant);
+    let n = len(0.06);
+    let a = lp(900.0 + variant as f32 * 250.0);
+    let mut y = 0.0;
+    (0..n)
+        .map(|i| {
+            let t = i as f32 / RATE as f32;
+            let w = noise(&mut rng);
+            y += a * (w - y);
+            let claw = if t < 0.004 { w * 0.3 } else { 0.0 };
+            y * (-t * 70.0).exp() * 2.0 + claw
+        })
+        .collect()
+}
+
 /// A bite: a low snarl and a snap of teeth.
 fn bite() -> Vec<f32> {
     let mut rng = Rng(0xB17E);
@@ -533,6 +554,7 @@ mod tests {
             hit(2),
             kill(),
             bark(1),
+            paw(2),
             bite(),
             yelp(),
             hurt(),
