@@ -1,5 +1,5 @@
-//! Rifle-scope optic: the right mouse button puts it up (10x) and takes it down again; the mouse wheel zooms
-//! between `MIN_ZOOM` and `MAX_ZOOM` while it is up. Zoom narrows the camera's field of view and slows the
+//! Rifle-scope optic: the right mouse button puts it up (easing in to 10x) and takes it down again; the
+//! mouse wheel zooms smoothly between `MIN_ZOOM` and `MAX_ZOOM` while it is up. Zoom narrows the camera's field of view and slows the
 //! mouse look by the same factor. The view is a full-screen overlay: black around a round lens with a dark
 //! rim, a thin crosshair with thick posts from the edge and mil dots, and the zoom under the lens.
 
@@ -17,9 +17,11 @@ impl Plugin for OpticPlugin {
         app.insert_resource(Optic {
             on: false,
             zoom: 1.0,
+            target: 1.0,
+            last: START_ZOOM,
         })
         .add_systems(Startup, setup_optic)
-        .add_systems(Update, optic);
+        .add_systems(Update, (optic, layout));
     }
 }
 
@@ -29,27 +31,45 @@ const MAX_ZOOM: f32 = 30.0;
 /// Zoom factor per wheel notch (a touchpad's pixels count as `PIXELS_PER_NOTCH` per notch).
 const ZOOM_STEP: f32 = 1.15;
 const PIXELS_PER_NOTCH: f32 = 40.0;
+/// How fast the zoom follows its target: the remaining (logarithmic) distance shrinks by e every 1/RATE s.
+const ZOOM_RATE: f32 = 12.0;
 /// Size of the generated reticle texture in pixels; the lens radius as a share of it.
 const SIZE: usize = 1024;
 const LENS: f32 = 0.48;
 
-/// Whether the optic is up and its zoom (1 when down); the player's look divides the mouse by `zoom`.
+/// Whether the optic is up, its current zoom (1 when down) easing toward `target` (set by the click and the
+/// wheel); the player's look divides the mouse by `zoom`.
 #[derive(Resource)]
 pub struct Optic {
     pub on: bool,
     pub zoom: f32,
+    target: f32,
+    /// Zoom the optic had when last put down; it comes up at this zoom again (first time `START_ZOOM`).
+    last: f32,
 }
 
 #[derive(Component)]
 struct OpticView;
+
+/// Parts of the overlay placed in pixels by `layout`: the lens square and the black bars beside it.
+#[derive(Component)]
+enum Part {
+    Lens,
+    Left,
+    Right,
+}
 
 #[derive(Component)]
 struct ZoomLabel;
 
 fn setup_optic(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
     let reticle = images.add(reticle());
-    let black = Color::BLACK;
-    // Under the HUD (compass, help, fps): black side bars, the square reticle in the middle.
+    let absolute = || Node {
+        position_type: PositionType::Absolute,
+        ..default()
+    };
+    // Under the HUD (compass, help, fps). Every part is absolute and sized in pixels, so nothing between
+    // them can leave a gap.
     commands
         .spawn((
             Node {
@@ -63,26 +83,18 @@ fn setup_optic(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
             OpticView,
         ))
         .with_children(|c| {
+            c.spawn((absolute(), BackgroundColor(Color::BLACK), Part::Left));
+            c.spawn((absolute(), BackgroundColor(Color::BLACK), Part::Right));
+            c.spawn((absolute(), ImageNode::new(reticle), Part::Lens));
             c.spawn((
                 Node {
-                    flex_grow: 1.0,
-                    ..default()
-                },
-                BackgroundColor(black),
-            ));
-            c.spawn((
-                Node {
-                    height: Val::Percent(100.0),
-                    aspect_ratio: Some(1.0),
+                    position_type: PositionType::Absolute,
+                    width: Val::Percent(100.0),
+                    bottom: Val::Percent(4.0),
                     justify_content: JustifyContent::Center,
-                    align_items: AlignItems::End,
-                    padding: UiRect::bottom(Val::Percent(6.0)),
                     ..default()
                 },
-                ImageNode::new(reticle),
-            ))
-            .with_children(|c| {
-                c.spawn((
+                children![(
                     Text::new(""),
                     TextFont {
                         font_size: FontSize::Px(18.0),
@@ -90,19 +102,38 @@ fn setup_optic(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
                     },
                     TextColor(Color::srgb(0.8, 0.8, 0.75)),
                     ZoomLabel,
-                ));
-            });
-            c.spawn((
-                Node {
-                    flex_grow: 1.0,
-                    ..default()
-                },
-                BackgroundColor(black),
+                )],
             ));
         });
 }
 
+/// The lens is a square as high as the window in its middle; the bars fill the rest of the width and reach
+/// 2 px under the lens (black there too), so rounding never shows a seam.
+fn layout(window: Single<&Window>, mut parts: Query<(&Part, &mut Node)>) {
+    let (w, h) = (window.width(), window.height());
+    let side = h.min(w);
+    let x0 = (w - side) / 2.0;
+    for (part, mut node) in &mut parts {
+        let (left, top, width, height) = match part {
+            Part::Lens => (x0, (h - side) / 2.0, side, side),
+            Part::Left => (0.0, 0.0, x0 + 2.0, h),
+            Part::Right => (x0 + side - 2.0, 0.0, w - x0 - side + 2.0, h),
+        };
+        if node.left != Val::Px(left)
+            || node.top != Val::Px(top)
+            || node.width != Val::Px(width)
+            || node.height != Val::Px(height)
+        {
+            node.left = Val::Px(left);
+            node.top = Val::Px(top);
+            node.width = Val::Px(width);
+            node.height = Val::Px(height);
+        }
+    }
+}
+
 fn optic(
+    time: Res<Time>,
     mouse: Res<ButtonInput<MouseButton>>,
     scroll: Res<AccumulatedMouseScroll>,
     mut state: ResMut<Optic>,
@@ -112,14 +143,30 @@ fn optic(
 ) {
     if mouse.just_pressed(MouseButton::Right) {
         state.on = !state.on;
-        state.zoom = if state.on { START_ZOOM } else { 1.0 };
+        // Up: zooms in smoothly from 1x to the remembered zoom. Down: back to the plain view at once.
+        if state.on {
+            state.target = state.last;
+        } else {
+            state.last = state.target;
+            state.target = 1.0;
+            state.zoom = 1.0;
+        }
     }
     if state.on && scroll.delta.y != 0.0 {
         let notches = match scroll.unit {
             MouseScrollUnit::Line => scroll.delta.y,
             MouseScrollUnit::Pixel => scroll.delta.y / PIXELS_PER_NOTCH,
         };
-        state.zoom = (state.zoom * ZOOM_STEP.powf(notches)).clamp(MIN_ZOOM, MAX_ZOOM);
+        state.target = (state.target * ZOOM_STEP.powf(notches)).clamp(MIN_ZOOM, MAX_ZOOM);
+    }
+    if state.zoom != state.target {
+        let k = 1.0 - (-ZOOM_RATE * time.delta_secs()).exp();
+        let zoom = state.zoom * (state.target / state.zoom).powf(k);
+        state.zoom = if (zoom / state.target - 1.0).abs() < 0.002 {
+            state.target
+        } else {
+            zoom
+        };
     }
     if !state.is_changed() {
         return;
