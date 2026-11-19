@@ -1,5 +1,5 @@
 //! Pistol: a first-person model at the bottom right of the view (a child of the camera), a crosshair in the
-//! middle of the screen and the ammo at the bottom right. Left click (with the mouse grabbed) fires one shot
+//! middle of the screen (its gap is the next shot's spread cone) and the ammo at the bottom right. Left click (with the mouse grabbed) fires one shot
 //! along the view: a short muzzle flash with a flash of light, recoil, and at the hit a bullet mark that
 //! stays `MARK_LIFE` seconds plus a burst of sparks. Hits on cars and props only spark (they move or change).
 //! Each shot leaves the center at a random angle inside a cone: its radius grows with movement (still,
@@ -127,6 +127,21 @@ struct Spark {
 
 #[derive(Component)]
 struct Crosshair;
+
+/// One piece of the crosshair.
+#[derive(Component, Clone, Copy)]
+enum Tick {
+    Dot,
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+/// Crosshair tick length and thickness, and the smallest gap, in logical pixels.
+const TICK_LEN: f32 = 9.0;
+const TICK_W: f32 = 2.0;
+const MIN_GAP: f32 = 3.0;
 
 #[derive(Component)]
 struct AmmoText;
@@ -263,22 +278,28 @@ fn setup_weapon(
         font_size: FontSize::Px(22.0),
         ..default()
     };
+    // Crosshair: a dot and four ticks, placed in pixels by `ui` at the spread radius of the next shot.
     commands
-        .spawn(Node {
-            position_type: PositionType::Absolute,
-            width: Val::Percent(100.0),
-            height: Val::Percent(100.0),
-            justify_content: JustifyContent::Center,
-            align_items: AlignItems::Center,
-            ..default()
-        })
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                ..default()
+            },
+            Crosshair,
+        ))
         .with_children(|c| {
-            c.spawn((
-                Text::new("+"),
-                font.clone(),
-                TextColor(Color::srgba(1.0, 1.0, 1.0, 0.85)),
-                Crosshair,
-            ));
+            for tick in [Tick::Dot, Tick::Left, Tick::Right, Tick::Up, Tick::Down] {
+                c.spawn((
+                    Node {
+                        position_type: PositionType::Absolute,
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.85)),
+                    tick,
+                ));
+            }
         });
     commands.spawn((
         Text::new(""),
@@ -291,6 +312,19 @@ fn setup_weapon(
         },
         AmmoText,
     ));
+}
+
+/// Spread cone radius (radians) of the next shot for this movement and series count, and the shot's place
+/// in the series (0 = first). The shot and the crosshair both use it.
+fn spread(motion: Motion, streak: f32) -> (f32, usize) {
+    let base = match motion {
+        Motion::Still => SPREAD_STILL,
+        Motion::Walk => SPREAD_WALK,
+        Motion::Run => SPREAD_RUN,
+        Motion::Air => SPREAD_AIR,
+    };
+    let nth = (streak.ceil() as usize).min(STREAK_FACTOR.len() - 1);
+    ((base * STREAK_FACTOR[nth]).to_radians(), nth)
 }
 
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
@@ -336,14 +370,7 @@ fn fire(
     gun.flash = FLASH;
 
     let (camera, player) = *camera;
-    let base = match player.motion() {
-        Motion::Still => SPREAD_STILL,
-        Motion::Walk => SPREAD_WALK,
-        Motion::Run => SPREAD_RUN,
-        Motion::Air => SPREAD_AIR,
-    };
-    let nth = (gun.streak.ceil() as usize).min(STREAK_FACTOR.len() - 1);
-    let radius = (base * STREAK_FACTOR[nth]).to_radians();
+    let (radius, nth) = spread(player.motion(), gun.streak);
     gun.streak = (nth + 1) as f32;
     // Uniform over the cone's disk: angle off center ~ sqrt(u), any direction around it.
     let off = radius * gun.rng.unit().sqrt();
@@ -577,10 +604,18 @@ fn marks(
     }
 }
 
+/// Crosshair gap = the next shot's spread cone on screen: tan(radius) / tan(fov / 2) of half the window
+/// height (vertical fov), eased so it opens on a shot and closes as the series cools; ammo text.
+#[allow(clippy::too_many_arguments)]
 fn ui(
+    time: Res<Time>,
     gun: Res<Gun>,
     optic: Res<Optic>,
+    window: Single<&Window>,
+    camera: Single<(&Player, &Projection)>,
+    mut gap: Local<f32>,
     mut cross: Single<&mut Visibility, With<Crosshair>>,
+    mut ticks: Query<(&Tick, &mut Node)>,
     mut ammo: Single<&mut Text, With<AmmoText>>,
 ) {
     **cross = if optic.on {
@@ -588,6 +623,29 @@ fn ui(
     } else {
         Visibility::Inherited
     };
+    let (player, projection) = *camera;
+    let fov = match projection {
+        Projection::Perspective(p) => p.fov,
+        _ => crate::player::FOV,
+    };
+    let (w, h) = (window.width(), window.height());
+    let (radius, _) = spread(player.motion(), gun.streak);
+    let target = (radius.tan() / (fov / 2.0).tan() * h / 2.0).max(MIN_GAP);
+    *gap += (target - *gap) * (time.delta_secs() * 20.0).min(1.0);
+    let (cx, cy, g) = (w / 2.0, h / 2.0, *gap);
+    for (tick, mut node) in &mut ticks {
+        let (left, top, width, height) = match tick {
+            Tick::Dot => (cx - TICK_W / 2.0, cy - TICK_W / 2.0, TICK_W, TICK_W),
+            Tick::Left => (cx - g - TICK_LEN, cy - TICK_W / 2.0, TICK_LEN, TICK_W),
+            Tick::Right => (cx + g, cy - TICK_W / 2.0, TICK_LEN, TICK_W),
+            Tick::Up => (cx - TICK_W / 2.0, cy - g - TICK_LEN, TICK_W, TICK_LEN),
+            Tick::Down => (cx - TICK_W / 2.0, cy + g, TICK_W, TICK_LEN),
+        };
+        node.left = Val::Px(left);
+        node.top = Val::Px(top);
+        node.width = Val::Px(width);
+        node.height = Val::Px(height);
+    }
     ammo.0 = match gun.reload {
         Some(_) => "reloading".into(),
         None if gun.ammo == 0 => format!("0 / {MAGAZINE}  R reload"),
