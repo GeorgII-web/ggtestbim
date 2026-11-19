@@ -1133,6 +1133,26 @@ impl Builder {
             min: Vec3::new(ix0, e, iz0),
             max: Vec3::new(ix1, e + bl.floors as f32 * FH, iz1),
         });
+        // Watcher spots outside: at each corner on the terrace, pressed to one of the two walls just short of
+        // the edge (peeking around it), and on the roof inside the parapet corners (not the stairwell's).
+        let top = e + bl.floors as f32 * FH;
+        for (cx, cz, sx, sz) in [
+            (x0, z0, 1.0, 1.0),
+            (x1, z0, -1.0, 1.0),
+            (x0, z1, 1.0, -1.0),
+            (x1, z1, -1.0, -1.0),
+        ] {
+            let spot = if self.rng.chance(0.5) {
+                Vec3::new(cx - sx * 0.35, e, cz + sz * 0.3)
+            } else {
+                Vec3::new(cx + sx * 0.3, e, cz - sz * 0.35)
+            };
+            self.spots.push(spot);
+            if cx != x0 || cz != z0 {
+                self.spots
+                    .push(Vec3::new(cx + sx * (T + 0.5), top, cz + sz * (T + 0.5)));
+            }
+        }
 
         self.add(
             Vec3::new(ix0, e, iz0),
@@ -1168,8 +1188,8 @@ impl Builder {
                 } else {
                     self.openings(u0, u1, doors)
                 };
-                // Watcher spots: 0.6 m inside upper-floor windows, away from the stairwell.
-                if k >= 1 && !roof {
+                // Watcher spots: 0.6 m inside the windows of every floor, away from the stairwell.
+                if !roof {
                     for o in ops.iter().filter(|o| o.bottom > 0.0) {
                         let inside = T + 0.6;
                         let spot = match side {

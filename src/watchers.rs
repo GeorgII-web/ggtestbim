@@ -1,6 +1,7 @@
-//! Watchers: rare tall dark figures with glowing eyes standing behind upper-floor windows, always turned
-//! toward the player. They can't be found: come within `FLEE` and the watcher is gone, standing at a
-//! window far away (or nowhere); while the player isn't looking it may move to another window.
+//! Watchers: tall dark figures with glowing eyes standing behind windows, at building corners or on roofs,
+//! always turned toward the player. They can't be caught: come within `FLEE` and the watcher is gone, to a
+//! spot far away (or nowhere); once seen, it moves the moment the player looks away, and while unseen it
+//! may wander to another spot of its chunk.
 
 use bevy::prelude::*;
 
@@ -16,10 +17,11 @@ impl Plugin for WatchersPlugin {
     }
 }
 
-/// Share of new chunks with window spots that get a watcher.
-const CHANCE: f32 = 0.35;
+/// Chance of each of the (up to) `PER_CHUNK` watchers of a new chunk with spots.
+const CHANCE: f32 = 0.8;
+const PER_CHUNK: usize = 2;
 /// Closer than this and the watcher moves away; a new spot must be at least `FAR` from the player.
-const FLEE: f32 = 16.0;
+const FLEE: f32 = 20.0;
 const FAR: f32 = 30.0;
 /// While unseen, every `WANDER_EVERY` seconds a watcher may move to another window of its chunk.
 const WANDER_EVERY: f32 = 6.0;
@@ -29,6 +31,8 @@ const HIDDEN: Vec3 = Vec3::new(0.0, -500.0, 0.0);
 struct Watcher {
     spots: Vec<Vec3>,
     clock: f32,
+    /// The player has looked at it at this spot: it leaves as soon as the player looks away.
+    noticed: bool,
 }
 
 #[derive(Resource)]
@@ -74,44 +78,58 @@ fn spawn_watchers(
     }
     let all = std::mem::take(&mut level.new_spots);
     for spots in all {
-        if spots.is_empty() || !level.rng.chance(CHANCE) {
+        if spots.is_empty() {
             continue;
         }
-        let at = spots[level.rng.below(spots.len() as u32) as usize];
-        let part = |center: Vec3, size: Vec3, mat: &Handle<StandardMaterial>| {
-            (
-                Mesh3d(assets.cube.clone()),
-                MeshMaterial3d(mat.clone()),
-                Transform::from_translation(center).with_scale(size),
-            )
-        };
-        // Modeled facing local -z: thin body, long neck, head, two eyes on the front.
-        commands
-            .spawn((
-                Transform::from_translation(at),
-                Visibility::default(),
-                Watcher { spots, clock: 0.0 },
-            ))
-            .with_children(|c| {
-                c.spawn(part(
-                    Vec3::new(0.0, 1.05, 0.0),
-                    Vec3::new(0.45, 2.1, 0.3),
-                    &assets.body,
-                ));
-                c.spawn(part(
-                    Vec3::new(0.0, 2.35, 0.0),
-                    Vec3::new(0.32, 0.4, 0.32),
-                    &assets.body,
-                ));
-                for x in [-0.08, 0.08] {
-                    c.spawn(part(
-                        Vec3::new(x, 2.4, -0.17),
-                        Vec3::new(0.1, 0.07, 0.02),
-                        &assets.eyes,
-                    ));
-                }
-            });
+        // Different spots, or two figures would overlap.
+        let first = level.rng.below(spots.len() as u32) as usize;
+        for k in 0..PER_CHUNK.min(spots.len()) {
+            if level.rng.chance(CHANCE) {
+                let at = spots[(first + k * spots.len() / PER_CHUNK) % spots.len()];
+                spawn_watcher(&mut commands, &assets, at, spots.clone());
+            }
+        }
     }
+}
+
+fn spawn_watcher(commands: &mut Commands, assets: &WatcherAssets, at: Vec3, spots: Vec<Vec3>) {
+    let part = |center: Vec3, size: Vec3, mat: &Handle<StandardMaterial>| {
+        (
+            Mesh3d(assets.cube.clone()),
+            MeshMaterial3d(mat.clone()),
+            Transform::from_translation(center).with_scale(size),
+        )
+    };
+    // Modeled facing local -z: thin body, long neck, head, two eyes on the front.
+    commands
+        .spawn((
+            Transform::from_translation(at),
+            Visibility::default(),
+            Watcher {
+                spots,
+                clock: 0.0,
+                noticed: false,
+            },
+        ))
+        .with_children(|c| {
+            c.spawn(part(
+                Vec3::new(0.0, 1.05, 0.0),
+                Vec3::new(0.45, 2.1, 0.3),
+                &assets.body,
+            ));
+            c.spawn(part(
+                Vec3::new(0.0, 2.35, 0.0),
+                Vec3::new(0.32, 0.4, 0.32),
+                &assets.body,
+            ));
+            for x in [-0.08, 0.08] {
+                c.spawn(part(
+                    Vec3::new(x, 2.4, -0.17),
+                    Vec3::new(0.1, 0.07, 0.02),
+                    &assets.eyes,
+                ));
+            }
+        });
 }
 
 fn watch(
@@ -132,10 +150,17 @@ fn watch(
         w.clock += time.delta_secs();
         let to = eye - tf.translation;
         let dist = to.length();
-        let seen = tf.translation != HIDDEN && (-to).normalize().dot(forward) > 0.8;
+        // Seen: near the center of the view. Away: off the screen's sides (75 degree vertical FOV), so a
+        // move is never visible.
+        let look = (-to).normalize().dot(forward);
+        let seen = tf.translation != HIDDEN && look > 0.8;
+        let away = look < 0.5;
         let flee = dist < FLEE;
-        if flee || (!seen && w.clock > WANDER_EVERY && level.rng.chance(0.3)) {
+        let looked_away = w.noticed && away;
+        w.noticed |= seen;
+        if flee || looked_away || (away && w.clock > WANDER_EVERY && level.rng.chance(0.3)) {
             w.clock = 0.0;
+            w.noticed = false;
             let far: Vec<Vec3> = w
                 .spots
                 .iter()
