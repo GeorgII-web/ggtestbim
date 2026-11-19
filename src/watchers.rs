@@ -5,7 +5,8 @@
 //! watching long enough, it goes back the way it came (or along another escape that ends out of sight) and
 //! is gone once something blocks the view. If its cover turns out to be in view, it ducks down out of sight
 //! instead of standing there. Closer than `CATCH` it ducks at once (never caught).
-//! While a stranger sees the player (in its line of sight within `Exposure`), it calls the dogs near it.
+//! While a stranger sees the player (in its line of sight within `Exposure`) or hears a noise the player made
+//! (`Noises`: steps, landings, shots), it calls the dogs near it to that place.
 //! A bullet kills it (`Killed`): it falls backwards, its eyes go out, it sinks into the ground.
 
 use bevy::prelude::*;
@@ -13,6 +14,7 @@ use bevy::prelude::*;
 use crate::flashlight::Exposure;
 use crate::level::{Level, Spot, SpotKind};
 use crate::player::Player;
+use crate::sound::Noises;
 use crate::targets::{Blip, Killed, Kind, Shootable};
 
 pub struct WatchersPlugin;
@@ -317,6 +319,7 @@ fn watch(
     mut watchers: Query<(Entity, &mut Watcher, &mut Transform), Without<Killed>>,
     level: Res<Level>,
     exposure: Res<Exposure>,
+    noises: Res<Noises>,
     mut call: ResMut<DogCall>,
 ) {
     let dt = time.delta_secs();
@@ -337,6 +340,12 @@ fn watch(
             w.clock = 0.0;
         }
         let mut facing = eye - tf.translation;
+        // A noise the player made within earshot: the dogs near it are called there.
+        if !matches!(w.state, State::Duck)
+            && let Some(n) = noises.0.iter().find(|n| n.0.distance(tf.translation) < n.1)
+        {
+            call.0 = Some((n.0, tf.translation));
+        }
         match &mut w.state {
             State::Move {
                 path,

@@ -85,6 +85,10 @@ pub struct Player {
     pub(crate) health: f32,
     /// Seconds since the last damage (health regenerates after a while).
     pub(crate) since_hurt: f32,
+    /// Dead: no movement, look or shooting until the health module respawns the player.
+    pub(crate) dead: bool,
+    /// Seconds since the last (re)spawn or new world (dogs keep away for a while).
+    pub(crate) since_spawn: f32,
 }
 
 /// How the player moves right now, for the gun's spread.
@@ -113,6 +117,8 @@ impl Player {
         self.vel = Vec3::ZERO;
         self.health = MAX_HEALTH;
         self.since_hurt = f32::MAX;
+        self.dead = false;
+        self.since_spawn = 0.0;
     }
 
     /// Feet position.
@@ -175,6 +181,8 @@ fn spawn_player(mut commands: Commands) {
             jump_pressed: f32::MAX,
             health: MAX_HEALTH,
             since_hurt: f32::MAX,
+            dead: false,
+            since_spawn: 0.0,
         },
     ));
 }
@@ -211,7 +219,7 @@ fn look(
     optic: Res<Optic>,
     mut player: Single<&mut Player>,
 ) {
-    if cursor.grab_mode == CursorGrabMode::None {
+    if cursor.grab_mode == CursorGrabMode::None || player.dead {
         return;
     }
     // Through the optic the view turns slower by its zoom, so aiming stays steady.
@@ -230,10 +238,15 @@ fn walk(
 ) {
     let (mut p, mut tf) = player.into_inner();
     let dt = time.delta_secs().min(1.0 / 30.0);
-
+    // Dead: the body stays where it fell until the respawn.
+    if p.dead {
+        return;
+    }
+    p.since_spawn += dt;
     if keys.just_pressed(KeyCode::KeyN) || p.pos.y < -30.0 {
         p.pos = SPAWN;
         p.vel = Vec3::ZERO;
+        p.since_spawn = 0.0;
     }
     // Wait until the chunk under the player is generated.
     if !level.loaded(p.pos) {
@@ -457,6 +470,8 @@ mod tests {
             jump_pressed: f32::MAX,
             health: MAX_HEALTH,
             since_hurt: f32::MAX,
+            dead: false,
+            since_spawn: 0.0,
         }
     }
 

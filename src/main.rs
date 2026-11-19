@@ -9,6 +9,7 @@ mod flashlight;
 mod health;
 mod hud;
 mod level;
+mod lightsticks;
 mod optic;
 mod player;
 mod radar;
@@ -53,6 +54,7 @@ fn main() {
             health::HealthPlugin,
             radar::RadarPlugin,
         ))
+        .add_plugins(lightsticks::LightSticksPlugin)
         // Shadows only near the player (2 cascades to 50 m, 1024 map): cheap enough for an integrated GPU.
         .insert_resource(DirectionalLightShadowMap { size: 1024 })
         .add_systems(Startup, setup)

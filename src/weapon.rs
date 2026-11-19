@@ -20,7 +20,7 @@ use crate::cars::CarBoxes;
 use crate::level::{Level, PropBoxes, Rng, ray_box};
 use crate::optic::Optic;
 use crate::player::{Motion, Player};
-use crate::sound::{Sfx, SoundQueue};
+use crate::sound::{HEAR_SHOT, Noises, Sfx, SoundQueue};
 use crate::targets::{Killed, Kind, Shootable};
 
 pub struct WeaponPlugin;
@@ -347,6 +347,7 @@ fn fire(
     assets: Res<WeaponAssets>,
     mut gun: ResMut<Gun>,
     mut sound: ResMut<SoundQueue>,
+    mut noises: ResMut<Noises>,
 ) {
     let dt = time.delta_secs();
     gun.cooldown -= dt;
@@ -357,6 +358,10 @@ fn fire(
             gun.reload = None;
             gun.ammo = MAGAZINE;
         }
+    }
+    // Dead: no reload, no shots.
+    if camera.1.dead {
+        return;
     }
     if keys.just_pressed(KeyCode::KeyR) && gun.reload.is_none() && gun.ammo < MAGAZINE {
         gun.reload = Some(0.0);
@@ -379,6 +384,7 @@ fn fire(
         return;
     }
     sound.play(Sfx::Shot, None, 0.8);
+    noises.make(camera.1.feet(), HEAR_SHOT);
     gun.ammo -= 1;
     gun.cooldown = FIRE_GAP;
     gun.recoil = 1.0;

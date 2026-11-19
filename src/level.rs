@@ -349,6 +349,9 @@ fn setup_palette(
         .map(|m| {
             let mut mat = materials.get(m).expect("material just added").clone();
             mat.occlusion_texture = Some(shade.clone());
+            // A faint glow of its own (textured like the surface), so rooms are never fully dark.
+            mat.emissive = mat.base_color.to_linear() * INDOOR_GLOW;
+            mat.emissive_texture = mat.base_color_texture.clone();
             materials.add(mat)
         })
         .collect();
@@ -614,6 +617,9 @@ fn haunt(
 
 /// Share of the sky's ambient light that reaches faces inside buildings.
 const INDOOR_AMBIENT: f32 = 0.15;
+/// Indoor faces also glow by themselves at this many nits times their color (about the light a room gets
+/// from an ambient of 12): dim at night, never black.
+const INDOOR_GLOW: f32 = 12.0;
 
 /// True when a face (a point just in front of its center) lies in one of the indoor volumes.
 fn indoor(rooms: &[Aabb], p: Vec3) -> bool {

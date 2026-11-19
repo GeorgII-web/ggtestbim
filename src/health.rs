@@ -1,6 +1,6 @@
 //! Health: a bar at the bottom left (green, yellow, red), a red flash on every hit, regeneration
 //! (`REGEN` per second after `REGEN_AFTER` seconds without damage) and death: at 0 the screen goes dark red
-//! with "You died" for `DEAD_TIME` seconds, then the player respawns at the spawn point with full health.
+//! with "You died" for `DEAD_TIME` seconds (no control meanwhile), then the player respawns at the spawn point with full health.
 
 use bevy::prelude::*;
 
@@ -132,6 +132,7 @@ fn health(
     }
     if player.health <= 0.0 {
         *dead = Some(0.0);
+        player.dead = true;
         return;
     }
     player.since_hurt += dt;

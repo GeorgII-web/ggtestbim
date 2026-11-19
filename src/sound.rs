@@ -4,6 +4,7 @@
 //! and gives the cars near the player a looping engine whose pitch follows the car's speed.
 //! Spatial sounds use `SPATIAL_SCALE`: rodio's gain falls as 1 / (scaled distance)^2, so at 0.12 a sound is
 //! full up to about 8 m and a ninth as loud at 25 m.
+//! `Noises` carries the player's steps and shots to dogs and strangers (how far each one carries).
 
 use std::num::NonZero;
 use std::sync::Arc;
@@ -25,6 +26,7 @@ impl Plugin for SoundPlugin {
     fn build(&self, app: &mut App) {
         app.add_audio_source::<Synth>()
             .insert_resource(SoundQueue(Vec::new()))
+            .insert_resource(Noises(Vec::new()))
             .add_systems(Startup, setup_sounds)
             .add_systems(PostStartup, add_listener)
             .add_systems(Update, (footsteps, engines))
@@ -114,6 +116,24 @@ impl SoundQueue {
     }
 }
 
+/// Noises the player makes, for dogs and strangers to hear: where, how far it carries (m), age (s).
+/// Kept for a few frames so every listener sees each one whatever the system order.
+#[derive(Resource)]
+pub struct Noises(pub Vec<(Vec3, f32, f32)>);
+
+impl Noises {
+    pub fn make(&mut self, at: Vec3, radius: f32) {
+        self.0.push((at, radius, 0.0));
+    }
+}
+
+/// How far the player's sounds carry: steps crouched, walking, running, a landing, a shot.
+pub const HEAR_CROUCH: f32 = 3.0;
+pub const HEAR_WALK: f32 = 8.0;
+pub const HEAR_RUN: f32 = 22.0;
+pub const HEAR_LAND: f32 = 14.0;
+pub const HEAR_SHOT: f32 = 90.0;
+
 #[derive(Resource)]
 struct Sounds {
     steps: Vec<Handle<Synth>>,
@@ -168,7 +188,17 @@ fn add_listener(mut commands: Commands, camera: Single<Entity, With<Player>>) {
     commands.entity(*camera).insert(SpatialListener::new(0.3));
 }
 
-fn play_queue(mut commands: Commands, mut queue: ResMut<SoundQueue>, mut sounds: ResMut<Sounds>) {
+fn play_queue(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut queue: ResMut<SoundQueue>,
+    mut sounds: ResMut<Sounds>,
+    mut noises: ResMut<Noises>,
+) {
+    for n in &mut noises.0 {
+        n.2 += time.delta_secs();
+    }
+    noises.0.retain(|n| n.2 < 0.2);
     let sounds = &mut *sounds;
     for (sfx, at, volume) in std::mem::take(&mut queue.0) {
         let rng = &mut sounds.rng;
@@ -209,25 +239,28 @@ fn footsteps(
     time: Res<Time>,
     player: Single<&Player>,
     mut queue: ResMut<SoundQueue>,
+    mut noises: ResMut<Noises>,
     mut walked: Local<f32>,
     mut last: Local<Option<Motion>>,
 ) {
     let motion = player.motion();
     if *last == Some(Motion::Air) && motion != Motion::Air {
         queue.play(Sfx::Step, None, 0.3);
+        noises.make(player.feet(), HEAR_LAND);
         *walked = 0.0;
     }
     *last = Some(motion);
-    let (stride, volume) = match motion {
-        Motion::Walk if player.crouched() => (STRIDE_WALK, 0.04),
-        Motion::Walk => (STRIDE_WALK, 0.1),
-        Motion::Run => (STRIDE_RUN, 0.18),
+    let (stride, volume, heard) = match motion {
+        Motion::Walk if player.crouched() => (STRIDE_WALK, 0.04, HEAR_CROUCH),
+        Motion::Walk => (STRIDE_WALK, 0.1, HEAR_WALK),
+        Motion::Run => (STRIDE_RUN, 0.18, HEAR_RUN),
         Motion::Still | Motion::Air => return,
     };
     *walked += player.ground_speed() * time.delta_secs();
     if *walked >= stride {
         *walked -= stride;
         queue.play(Sfx::Step, None, volume);
+        noises.make(player.feet(), heard);
     }
 }
 
