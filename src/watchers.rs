@@ -1,108 +1,107 @@
-//! Watchers: tall dark figures with a pale face and glowing eyes, standing behind windows, right at
-//! building corners or (rarely) on roofs, turned toward the player. When the player really sees one (on
-//! screen and in line of sight) for a moment, or comes within `FLEE`, it runs along the escape of its spot
-//! that ends out of the player's line of sight (a step aside behind the wall next to a window, around the
-//! corner or back along the wall, back from the roof edge) and hides there. It disappears only while a wall
-//! or object is between it and the player, and turns up again at another spot of its chunk, far from the
-//! player and out of sight. Only if the player gets within `CATCH` does it vanish in view (never caught).
-//! A bullet kills it (`Killed`, set by the weapon): it falls backwards, its eyes go out, it sinks into the
-//! ground and is removed.
+//! Strangers (watchers): tall dark figures with a pale face and glowing eyes. A director keeps a few of them
+//! around the player, appearing at any time: each starts hidden at the end of one of its spot's escapes
+//! (the cover, chosen out of the player's line of sight), creeps out to the spot (to a window, around a
+//! corner, to a roof edge) and watches the player. Seen for a moment, approached within `FLEE`, or after
+//! watching long enough, it goes back the way it came (or along another escape that ends out of sight) and
+//! is gone once something blocks the view. If its cover turns out to be in view, it ducks down out of sight
+//! instead of standing there. Closer than `CATCH` it ducks at once (never caught).
+//! While a stranger sees the player (in its line of sight within `Exposure`), it calls the dogs near it.
+//! A bullet kills it (`Killed`): it falls backwards, its eyes go out, it sinks into the ground.
 
 use bevy::prelude::*;
 
-use crate::level::{Level, Rng, Spot, SpotKind};
+use crate::flashlight::Exposure;
+use crate::level::{Level, Spot, SpotKind};
 use crate::player::Player;
+use crate::targets::{Blip, Killed, Kind, Shootable};
 
 pub struct WatchersPlugin;
 
 impl Plugin for WatchersPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, setup_watchers)
-            .add_systems(Update, (spawn_watchers, watch, die).chain());
+        app.insert_resource(Spots(Vec::new()))
+            .insert_resource(DogCall(None))
+            .add_systems(Startup, setup_watchers)
+            .add_systems(Update, (collect_spots, direct, watch, die).chain());
     }
 }
 
-/// Chance of each of the (up to) `PER_CHUNK` watchers of a new chunk with spots.
-const CHANCE: f32 = 0.9;
-const PER_CHUNK: usize = 4;
-/// Spot kind weights for placing a watcher: mostly windows and corners, roofs now and then.
+/// Strangers around the player at most, and how often the director tries to bring a new one.
+const MAX_ACTIVE: usize = 5;
+const SPAWN_EVERY: (f32, f32) = (1.5, 4.0);
+/// Distance range from the player for a new stranger's spot.
+const SPAWN_DIST: (f32, f32) = (18.0, 80.0);
+/// Spot kind weights: mostly windows and corners, roofs now and then.
 const WEIGHTS: [(SpotKind, f32); 3] = [
     (SpotKind::Window, 0.5),
     (SpotKind::Corner, 0.4),
     (SpotKind::Roof, 0.1),
 ];
-/// Closer than this and the watcher runs; a new spot must be at least `FAR` from the player.
-const FLEE: f32 = 20.0;
-const FAR: f32 = 30.0;
-/// Closer than this it vanishes on the spot, even in plain view (the last resort).
+/// Closer than this it goes back into cover; closer than `CATCH` it ducks at once.
+const FLEE: f32 = 16.0;
 const CATCH: f32 = 3.0;
-/// Seen this long (random in the range) and it runs.
-const REACT: (f32, f32) = (0.3, 0.9);
+/// Seen this long (random in the range) and it goes back.
+const REACT: (f32, f32) = (0.4, 1.2);
+/// Watches at most this long (random) before going back on its own.
+const LINGER: (f32, f32) = (5.0, 14.0);
+/// Creeping out, going back.
+const CREEP_SPEED: f32 = 1.6;
 const RUN_SPEED: f32 = 8.0;
-/// Hidden at the end of its escape, it stays at least this long before it can be gone.
-const HIDE_MIN: f32 = 0.6;
-/// Beyond this distance it is too small to count as seen.
+/// In cover but still in view this long: it ducks.
+const COVER_GRACE: f32 = 0.4;
+const DUCK_TIME: f32 = 0.35;
+/// Beyond this distance it is too small to count as seen by the player.
 const SEE_DIST: f32 = 120.0;
-/// While hidden behind something, every `WANDER_EVERY` seconds a watcher may move to another spot.
-const WANDER_EVERY: f32 = 6.0;
-/// Head height above the feet, the target of the line of sight.
+/// Head height above the feet, the target of lines of sight.
 const HEAD: f32 = 2.3;
-const HIDDEN: Vec3 = Vec3::new(0.0, -500.0, 0.0);
 /// Death: falling over takes `FALL`, then it lies until `LIE`, then sinks into the ground until `SINK`.
 const FALL: f32 = 0.6;
 const LIE: f32 = 2.0;
 const SINK: f32 = 4.0;
 
-/// A figure bullets can hit: its body box around the feet position.
-#[derive(Component)]
-pub(crate) struct Shootable;
+/// Spots of the loaded chunks.
+#[derive(Resource)]
+struct Spots(Vec<Spot>);
 
-impl Shootable {
-    pub(crate) fn aabb(&self, feet: Vec3) -> crate::level::Aabb {
-        crate::level::Aabb {
-            min: feet - Vec3::new(0.25, 0.0, 0.25),
-            max: feet + Vec3::new(0.25, 2.6, 0.25),
-        }
-    }
-}
-
-/// Shot: seconds since the hit; the watcher's behavior stops and `die` plays the death.
-#[derive(Component, Default)]
-pub(crate) struct Killed {
-    t: f32,
-    /// Rotation when hit; it falls backwards from there.
-    from: Option<Quat>,
-}
+/// The latest call for dogs: where the player was seen, and from where (dogs near the caller come).
+#[derive(Resource)]
+pub struct DogCall(pub Option<(Vec3, Vec3)>);
 
 #[derive(Component)]
 struct Eye;
 
 enum State {
-    /// Standing at its spot, watching the player; `seen` counts how long the player has seen it.
+    /// Moving along `path` (toward the spot when creeping out, toward cover when going back).
+    Move {
+        path: Vec<Vec3>,
+        next: usize,
+        speed: f32,
+        out: bool,
+    },
+    /// At the spot, watching; `seen` counts how long the player has seen it.
     Watch { seen: f32 },
-    /// Running along the escape waypoints, `next` is the one it heads for.
-    Run { path: Vec<Vec3>, next: usize },
-    /// At the end of its escape, waiting to be out of sight.
-    Hide,
-    /// Nowhere (at `HIDDEN`), waiting for a free spot.
-    Gone,
+    /// In cover: gone as soon as the view is blocked, ducks if not.
+    Cover,
+    /// Ducking (shrinking down), then gone.
+    Duck,
 }
 
 #[derive(Component)]
 struct Watcher {
-    spots: Vec<Spot>,
-    /// Index of the spot it stands at (or ran from).
-    spot: usize,
+    spot: Spot,
+    /// The escape it came out of (and goes back along unless another one hides it better).
+    escape: Vec<Vec3>,
     state: State,
     clock: f32,
     react: f32,
+    linger: f32,
 }
 
 #[derive(Resource)]
 struct WatcherAssets {
     cube: Handle<Mesh>,
     body: Handle<StandardMaterial>,
-    /// Pale, faintly glowing head: it shows in the dark rooms (15 % ambient) where the black body doesn't.
+    /// Pale, faintly glowing head: it shows in the dark rooms where the black body doesn't.
     face: Handle<StandardMaterial>,
     eyes: Handle<StandardMaterial>,
 }
@@ -134,69 +133,122 @@ fn setup_watchers(
     });
 }
 
-/// A random spot index by the kind weights, among the indices `ok` accepts (kinds with none are skipped).
-fn pick(rng: &mut Rng, spots: &[Spot], ok: impl Fn(usize) -> bool) -> Option<usize> {
-    let kinds: Vec<(SpotKind, f32)> = WEIGHTS
-        .iter()
-        .copied()
-        .filter(|(k, _)| (0..spots.len()).any(|i| spots[i].kind == *k && ok(i)))
-        .collect();
-    let total: f32 = kinds.iter().map(|(_, w)| w).sum();
-    let mut r = rng.unit() * total;
-    let kind = kinds
-        .iter()
-        .find(|(_, w)| {
-            r -= w;
-            r <= 0.0
-        })
-        .or(kinds.last())?
-        .0;
-    let of_kind: Vec<usize> = (0..spots.len())
-        .filter(|&i| spots[i].kind == kind && ok(i))
-        .collect();
-    Some(of_kind[rng.below(of_kind.len() as u32) as usize])
-}
-
-fn spawn_watchers(
+/// New chunks' spots join the pool, unloaded ones leave it; a new world (N) clears everything.
+fn collect_spots(
     mut commands: Commands,
-    assets: Res<WatcherAssets>,
     mut level: ResMut<Level>,
+    mut spots: ResMut<Spots>,
     keys: Res<ButtonInput<KeyCode>>,
     old: Query<Entity, With<Watcher>>,
 ) {
-    // A new world (N) brings new buildings: the old watchers leave with them.
     if keys.just_pressed(KeyCode::KeyN) {
         for e in &old {
             commands.entity(e).despawn();
         }
+        spots.0.clear();
     }
-    let all = std::mem::take(&mut level.new_spots);
-    for spots in all {
-        let mut taken: Vec<usize> = Vec::new();
-        for _ in 0..PER_CHUNK {
-            if !level.rng.chance(CHANCE) {
-                continue;
-            }
-            // Different spots, or two figures would overlap.
-            let Some(i) = pick(&mut level.rng, &spots, |i| {
-                !taken.iter().any(|&t| spots[t].pos == spots[i].pos)
-            }) else {
-                break;
-            };
-            taken.push(i);
-            let react = level.rng.range(REACT.0, REACT.1);
-            spawn_watcher(&mut commands, &assets, spots.clone(), i, react);
+    for chunk in std::mem::take(&mut level.new_spots) {
+        spots.0.extend(chunk);
+    }
+    let level = &*level;
+    spots.0.retain(|s| level.loaded(s.pos));
+}
+
+/// The player sees a point: on screen (well inside the view), near enough and nothing in between.
+fn player_sees(level: &Level, eye: Vec3, forward: Vec3, p: Vec3) -> bool {
+    let to = p - eye;
+    to.length() < SEE_DIST && to.normalize().dot(forward) > 0.75 && !level.blocked(eye, p)
+}
+
+fn end(e: &[Vec3]) -> Vec3 {
+    e[e.len() - 1]
+}
+
+/// The escape of the spot that ends out of the player's line of sight (the shortest such), if any.
+fn hidden_escape(level: &Level, eye: Vec3, spot: &Spot) -> Option<Vec<Vec3>> {
+    let length = |e: &Vec<Vec3>| {
+        let mut from = spot.pos;
+        e.iter()
+            .map(|&p| {
+                let d = p.distance(from);
+                from = p;
+                d
+            })
+            .sum::<f32>()
+    };
+    spot.escapes
+        .iter()
+        .filter(|e| level.blocked(eye, end(e) + Vec3::Y * HEAD))
+        .min_by(|a, b| length(a).total_cmp(&length(b)))
+        .cloned()
+}
+
+/// Every few seconds, with fewer than `MAX_ACTIVE` strangers, one appears hidden in the cover of a spot
+/// at a fitting distance and creeps out to it.
+#[allow(clippy::too_many_arguments)]
+fn direct(
+    mut commands: Commands,
+    time: Res<Time>,
+    assets: Res<WatcherAssets>,
+    spots: Res<Spots>,
+    camera: Single<&Transform, With<Player>>,
+    active: Query<(), (With<Watcher>, Without<Killed>)>,
+    mut level: ResMut<Level>,
+    mut timer: Local<f32>,
+) {
+    *timer -= time.delta_secs();
+    if *timer > 0.0 {
+        return;
+    }
+    *timer = level.rng.range(SPAWN_EVERY.0, SPAWN_EVERY.1);
+    if active.iter().count() >= MAX_ACTIVE || spots.0.is_empty() {
+        return;
+    }
+    let eye = camera.translation;
+    // A few random tries: a spot at the right distance whose cover the player can't see.
+    for _ in 0..12 {
+        let rng = &mut level.rng;
+        let r = rng.unit() * WEIGHTS.iter().map(|w| w.1).sum::<f32>();
+        let mut acc = 0.0;
+        let kind = WEIGHTS
+            .iter()
+            .find(|w| {
+                acc += w.1;
+                r <= acc
+            })
+            .map_or(SpotKind::Window, |w| w.0);
+        let spot = &spots.0[rng.below(spots.0.len() as u32) as usize];
+        let dist = spot.pos.distance(eye);
+        if spot.kind != kind || dist < SPAWN_DIST.0 || dist > SPAWN_DIST.1 {
+            continue;
         }
+        let Some(escape) = hidden_escape(&level, eye, spot) else {
+            continue;
+        };
+        let react = level.rng.range(REACT.0, REACT.1);
+        let linger = level.rng.range(LINGER.0, LINGER.1);
+        // From the cover back through the waypoints to the spot.
+        let mut path: Vec<Vec3> = escape.iter().rev().skip(1).copied().collect();
+        path.push(spot.pos);
+        let watcher = Watcher {
+            spot: spot.clone(),
+            escape: escape.clone(),
+            state: State::Move {
+                path,
+                next: 0,
+                speed: CREEP_SPEED,
+                out: true,
+            },
+            clock: 0.0,
+            react,
+            linger,
+        };
+        spawn_watcher(&mut commands, &assets, end(&escape), watcher);
+        return;
     }
 }
 
-fn spawn_watcher(
-    commands: &mut Commands,
-    assets: &WatcherAssets,
-    spots: Vec<Spot>,
-    spot: usize,
-    react: f32,
-) {
+fn spawn_watcher(commands: &mut Commands, assets: &WatcherAssets, at: Vec3, watcher: Watcher) {
     let part = |center: Vec3, size: Vec3, mat: &Handle<StandardMaterial>| {
         (
             Mesh3d(assets.cube.clone()),
@@ -207,16 +259,15 @@ fn spawn_watcher(
     // Modeled facing local -z: thin body, long neck, pale head, two eyes on the front.
     commands
         .spawn((
-            Transform::from_translation(spots[spot].pos),
+            Transform::from_translation(at),
             Visibility::default(),
-            Watcher {
-                spots,
-                spot,
-                state: State::Watch { seen: 0.0 },
-                clock: 0.0,
-                react,
+            watcher,
+            Shootable {
+                kind: Kind::Stranger,
+                half: 0.25,
+                height: 2.6,
             },
-            Shootable,
+            Blip(Kind::Stranger),
         ))
         .with_children(|c| {
             c.spawn(part(
@@ -242,133 +293,110 @@ fn spawn_watcher(
         });
 }
 
-/// The player sees a point: on screen (well inside the view), near enough and nothing in between.
-fn sees(level: &Level, eye: Vec3, forward: Vec3, p: Vec3) -> bool {
-    let to = p - eye;
-    to.length() < SEE_DIST && to.normalize().dot(forward) > 0.75 && !level.blocked(eye, p)
-}
-
-/// The escape of the spot that ends out of the player's line of sight (the shortest such), else the one
-/// that ends farthest from the player.
-fn choose_escape(level: &Level, eye: Vec3, spot: &Spot) -> Vec<Vec3> {
-    let end = |e: &Vec<Vec3>| e[e.len() - 1];
-    let length = |e: &Vec<Vec3>| {
-        let mut from = spot.pos;
-        e.iter()
-            .map(|&p| {
-                let d = p.distance(from);
-                from = p;
-                d
-            })
-            .sum::<f32>()
+/// Back into cover: the escape that ends hidden now (its own if that still hides it), else its own.
+fn go_back(w: &mut Watcher, level: &Level, eye: Vec3) {
+    let path = if level.blocked(eye, end(&w.escape) + Vec3::Y * HEAD) {
+        w.escape.clone()
+    } else {
+        hidden_escape(level, eye, &w.spot).unwrap_or_else(|| w.escape.clone())
     };
-    let hidden = spot
-        .escapes
-        .iter()
-        .filter(|e| level.blocked(eye, end(e) + Vec3::Y * HEAD))
-        .min_by(|a, b| length(a).total_cmp(&length(b)));
-    hidden
-        .or_else(|| {
-            spot.escapes
-                .iter()
-                .max_by(|a, b| end(a).distance(eye).total_cmp(&end(b).distance(eye)))
-        })
-        .cloned()
-        // Every spot keeps at least one escape (level generation drops the others); stay put otherwise.
-        .unwrap_or_else(|| vec![spot.pos])
+    w.escape = path.clone();
+    w.state = State::Move {
+        path,
+        next: 0,
+        speed: RUN_SPEED,
+        out: false,
+    };
 }
 
-/// Puts the watcher at a spot of its chunk far from the player and out of sight, or nowhere if none is free.
-fn relocate(w: &mut Watcher, level: &mut Level, tf: &mut Transform, eye: Vec3, forward: Vec3) {
-    let free: Vec<bool> = w
-        .spots
-        .iter()
-        .map(|s| s.pos.distance(eye) > FAR && !sees(level, eye, forward, s.pos + Vec3::Y * HEAD))
-        .collect();
-    let found = pick(&mut level.rng, &w.spots, |i| free[i]);
-    w.clock = 0.0;
-    match found {
-        Some(i) => {
-            w.spot = i;
-            w.state = State::Watch { seen: 0.0 };
-            w.react = level.rng.range(REACT.0, REACT.1);
-            tf.translation = w.spots[i].pos;
-        }
-        None => {
-            w.state = State::Gone;
-            tf.translation = HIDDEN;
-        }
-    }
-}
-
+#[allow(clippy::too_many_arguments)]
 fn watch(
     time: Res<Time>,
     mut commands: Commands,
-    camera: Single<&Transform, (With<Player>, Without<Watcher>)>,
+    camera: Single<(&Transform, &Player), Without<Watcher>>,
     mut watchers: Query<(Entity, &mut Watcher, &mut Transform), Without<Killed>>,
-    mut level: ResMut<Level>,
+    level: Res<Level>,
+    exposure: Res<Exposure>,
+    mut call: ResMut<DogCall>,
 ) {
     let dt = time.delta_secs();
+    let (camera, player) = *camera;
     let eye = camera.translation;
     let forward = camera.forward().as_vec3();
     for (e, mut w, mut tf) in &mut watchers {
-        // Its spots are gone with their chunk.
-        if !level.loaded(w.spots[0].pos) {
+        if !level.loaded(w.spot.pos) {
             commands.entity(e).despawn();
             continue;
         }
         let w = &mut *w;
         w.clock += dt;
+        let head = tf.translation + Vec3::Y * HEAD;
         let dist = tf.translation.distance(eye);
-        if !matches!(w.state, State::Gone) && dist < CATCH {
-            w.state = State::Gone;
+        if dist < CATCH && !matches!(w.state, State::Duck) {
+            w.state = State::Duck;
             w.clock = 0.0;
-            tf.translation = HIDDEN;
-            continue;
         }
-        let seen = !matches!(w.state, State::Gone)
-            && sees(&level, eye, forward, tf.translation + Vec3::Y * HEAD);
-        // Faces the player, or the way it runs (the model looks along local -z).
         let mut facing = eye - tf.translation;
         match &mut w.state {
-            State::Watch { seen: s } => {
-                *s = if seen { *s + dt } else { 0.0 };
-                let head = tf.translation + Vec3::Y * HEAD;
-                if *s > w.react || dist < FLEE {
-                    let path = choose_escape(&level, eye, &w.spots[w.spot]);
-                    w.state = State::Run { path, next: 0 };
-                } else if !seen
-                    && w.clock > WANDER_EVERY
-                    && level.rng.chance(0.3)
-                    && level.blocked(eye, head)
-                {
-                    relocate(w, &mut level, &mut tf, eye, forward);
-                }
-            }
-            State::Run { path, next } => {
+            State::Move {
+                path,
+                next,
+                speed,
+                out,
+            } => {
+                let is_out = *out;
                 let to = path[*next] - tf.translation;
-                let step = RUN_SPEED * dt;
+                let step = *speed * dt;
+                let mut arrived = false;
                 if to.length() <= step {
                     tf.translation = path[*next];
                     *next += 1;
-                    if *next == path.len() {
-                        w.state = State::Hide;
-                        w.clock = 0.0;
-                    }
+                    arrived = *next == path.len();
                 } else {
                     tf.translation += to.normalize() * step;
-                    facing = to;
+                    if !is_out {
+                        facing = to;
+                    }
+                }
+                if is_out && dist < FLEE {
+                    // Too close while still creeping out: back at once.
+                    go_back(w, &level, eye);
+                } else if arrived {
+                    w.state = if is_out {
+                        State::Watch { seen: 0.0 }
+                    } else {
+                        State::Cover
+                    };
+                    w.clock = 0.0;
                 }
             }
-            State::Hide => {
-                // Gone only behind cover, never in open view.
-                if w.clock > HIDE_MIN && level.blocked(eye, tf.translation + Vec3::Y * HEAD) {
-                    relocate(w, &mut level, &mut tf, eye, forward);
+            State::Watch { seen } => {
+                let visible = player_sees(&level, eye, forward, head);
+                *seen = if visible { *seen + dt } else { 0.0 };
+                // It sees the player: the dogs near it come.
+                if dist < exposure.0 && !level.blocked(head, eye) {
+                    call.0 = Some((player.feet(), tf.translation));
+                }
+                if *seen > w.react || dist < FLEE || w.clock > w.linger {
+                    go_back(w, &level, eye);
                 }
             }
-            State::Gone => {
-                if w.clock > WANDER_EVERY {
-                    relocate(w, &mut level, &mut tf, eye, forward);
+            State::Cover => {
+                if level.blocked(eye, head) {
+                    commands.entity(e).despawn();
+                    continue;
+                }
+                if w.clock > COVER_GRACE {
+                    w.state = State::Duck;
+                    w.clock = 0.0;
+                }
+            }
+            State::Duck => {
+                let k = 1.0 - (w.clock / DUCK_TIME).min(1.0);
+                tf.scale = Vec3::new(1.0, k.max(0.01), 1.0);
+                if w.clock > DUCK_TIME {
+                    commands.entity(e).despawn();
+                    continue;
                 }
             }
         }
@@ -382,7 +410,7 @@ fn watch(
 fn die(
     time: Res<Time>,
     mut commands: Commands,
-    mut dead: Query<(Entity, &mut Killed, &mut Transform, &Children)>,
+    mut dead: Query<(Entity, &mut Killed, &mut Transform, &Children), With<Watcher>>,
     mut eyes: Query<&mut Visibility, With<Eye>>,
 ) {
     for (e, mut k, mut tf, children) in &mut dead {

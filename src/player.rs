@@ -81,6 +81,10 @@ pub struct Player {
     /// Seconds since the feet last touched the ground, and since Space was last pressed.
     air_time: f32,
     jump_pressed: f32,
+    /// 0..=MAX_HEALTH; 0 is death (the health module respawns the player).
+    pub(crate) health: f32,
+    /// Seconds since the last damage (health regenerates after a while).
+    pub(crate) since_hurt: f32,
 }
 
 /// How the player moves right now, for the gun's spread.
@@ -92,7 +96,30 @@ pub(crate) enum Motion {
     Air,
 }
 
+pub(crate) const MAX_HEALTH: f32 = 100.0;
+/// Landing faster than this hurts, `FALL_DAMAGE` per m/s above it (a 1-story drop is ~14.5 m/s).
+const SAFE_FALL: f32 = 13.0;
+const FALL_DAMAGE: f32 = 7.0;
+
 impl Player {
+    pub(crate) fn hurt(&mut self, amount: f32) {
+        self.health = (self.health - amount).max(0.0);
+        self.since_hurt = 0.0;
+    }
+
+    /// Back to the spawn point with full health.
+    pub(crate) fn respawn(&mut self) {
+        self.pos = SPAWN;
+        self.vel = Vec3::ZERO;
+        self.health = MAX_HEALTH;
+        self.since_hurt = f32::MAX;
+    }
+
+    /// Feet position.
+    pub(crate) fn feet(&self) -> Vec3 {
+        self.pos
+    }
+
     /// Horizontal speed in m/s.
     pub(crate) fn ground_speed(&self) -> f32 {
         Vec2::new(self.vel.x, self.vel.z).length()
@@ -146,6 +173,8 @@ fn spawn_player(mut commands: Commands) {
             dip: 0.0,
             air_time: 0.0,
             jump_pressed: f32::MAX,
+            health: MAX_HEALTH,
+            since_hurt: f32::MAX,
         },
     ));
 }
@@ -296,6 +325,9 @@ fn walk(
     }
     if p.grounded && !was_grounded && fall_speed > 4.0 {
         p.dip = (fall_speed * 0.02).min(0.3);
+        if fall_speed > SAFE_FALL {
+            p.hurt((fall_speed - SAFE_FALL) * FALL_DAMAGE);
+        }
     }
 
     // Eye height (crouching) and the landing dip ease toward their targets.
@@ -423,6 +455,8 @@ mod tests {
             dip: 0.0,
             air_time: 0.0,
             jump_pressed: f32::MAX,
+            health: MAX_HEALTH,
+            since_hurt: f32::MAX,
         }
     }
 

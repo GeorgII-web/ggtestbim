@@ -68,7 +68,12 @@ fn advance(time: Res<Time>, keys: Res<ButtonInput<KeyCode>>, mut day: ResMut<Day
     day.hour = (day.hour + time.delta_secs() * 24.0 / DAY_SECONDS).rem_euclid(24.0);
 }
 
-fn smooth(a: f32, b: f32, x: f32) -> f32 {
+/// Sun height for an hour: -1 at midnight, 0 at 6:00 and 18:00, 1 at noon.
+pub fn sun_height(hour: f32) -> f32 {
+    ((hour - 6.0) / 24.0 * std::f32::consts::TAU).sin()
+}
+
+pub fn smooth(a: f32, b: f32, x: f32) -> f32 {
     let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
 }
@@ -83,8 +88,7 @@ fn apply(
     mut clock: Single<&mut Text, With<Clock>>,
 ) {
     let tau = std::f32::consts::TAU;
-    // Sun height: -1 at midnight, 0 at 6:00 and 18:00, 1 at noon.
-    let h = ((day.hour - 6.0) / 24.0 * tau).sin();
+    let h = sun_height(day.hour);
     // Compass angle of the sun: east (+x) at 6:00, south (+z) at noon, west at 18:00.
     let az = (day.hour - 6.0) / 24.0 * tau;
     let sun_dir = Vec3::new(az.cos(), 0.0, az.sin()) * (1.0 - h * h).max(0.0).sqrt() + Vec3::Y * h;

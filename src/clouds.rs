@@ -1,6 +1,7 @@
 //! Clouds: random clumps of flattened spheres high above the city, drifting with the wind and casting
 //! moving shadows. A cloud that drifts or is left too far from the player comes back on the opposite
-//! side with a new random shape.
+//! side with a new random shape. Their color follows the time of day: white by day, orange at dawn and
+//! dusk, dark slate at night.
 
 use bevy::prelude::*;
 
@@ -12,7 +13,7 @@ pub struct CloudsPlugin;
 impl Plugin for CloudsPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, setup_clouds)
-            .add_systems(Update, drift);
+            .add_systems(Update, (drift, tint));
     }
 }
 
@@ -109,5 +110,23 @@ fn drift(
             );
             shape(&mut commands, &assets, e, rng);
         }
+    }
+}
+
+fn tint(
+    day: Res<crate::daylight::DayTime>,
+    assets: Res<CloudAssets>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    use crate::daylight::{smooth, sun_height};
+    let h = sun_height(day.hour);
+    let night = Vec3::new(0.13, 0.14, 0.2);
+    let dusk = Vec3::new(1.0, 0.68, 0.52);
+    let white = Vec3::new(0.97, 0.97, 1.0);
+    let base = night.lerp(white, smooth(-0.12, 0.25, h));
+    let glow = smooth(-0.2, 0.0, h) * (1.0 - smooth(0.05, 0.3, h));
+    let c = base.lerp(dusk, glow * 0.7);
+    if let Some(mut m) = materials.get_mut(&assets.white) {
+        m.base_color = Color::srgb(c.x, c.y, c.z);
     }
 }

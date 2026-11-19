@@ -4,12 +4,17 @@
 mod cars;
 mod clouds;
 mod daylight;
+mod dogs;
+mod flashlight;
+mod health;
 mod hud;
 mod level;
 mod optic;
 mod player;
+mod radar;
 mod render_scale;
 mod sound;
+mod targets;
 mod textures;
 mod watchers;
 mod weapon;
@@ -43,6 +48,10 @@ fn main() {
             render_scale::RenderScalePlugin,
             sound::SoundPlugin,
             daylight::DaylightPlugin,
+            flashlight::FlashlightPlugin,
+            dogs::DogsPlugin,
+            health::HealthPlugin,
+            radar::RadarPlugin,
         ))
         // Shadows only near the player (2 cascades to 50 m, 1024 map): cheap enough for an integrated GPU.
         .insert_resource(DirectionalLightShadowMap { size: 1024 })

@@ -23,8 +23,8 @@ const HELP_HINT: &str = "~ help";
 const HELP: &str = "~ help
 WASD move (runs) | Shift walk | Ctrl crouch | Space jump | mouse look
 Ctrl + Space high jump (ledges, windows) | Right click optic, wheel zoom | Click grab mouse | Esc release
-Left click shoot | R reload | N new world | G shadows | F render resolution
-The clock under the fps: day and night pass in 20 minutes";
+Left click shoot | R reload | N new world | G shadows | F flashlight (you are seen from farther) | F2 render resolution
+The clock under the fps: day and night pass in 20 minutes | Radar bottom left: red dogs, pale strangers";
 
 #[derive(Component)]
 struct Compass;
@@ -156,7 +156,7 @@ fn compass(
     text.0 = head.into();
     south.0 = s.into();
     rest.0 = tail.into();
-    // The render resolution (F) next to the frame rate.
+    // The render resolution (F2) next to the frame rate.
     let res = scale.map_or(String::new(), |s| format!("{}p  ", s.height()));
     fps_text.0 = format!("{res}{:.0} fps", *fps);
 }

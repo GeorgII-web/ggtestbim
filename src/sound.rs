@@ -96,6 +96,11 @@ pub enum Sfx {
     Reload,
     Hit,
     Kill,
+    Bark,
+    Bite,
+    Yelp,
+    Hurt,
+    Switch,
 }
 
 /// One-shot sounds to play this frame: what, where (None: at the listener, not spatial), volume.
@@ -116,6 +121,11 @@ struct Sounds {
     dry: Handle<Synth>,
     reload: Handle<Synth>,
     kill: Handle<Synth>,
+    barks: Vec<Handle<Synth>>,
+    bite: Handle<Synth>,
+    yelp: Handle<Synth>,
+    hurt: Handle<Synth>,
+    switch: Handle<Synth>,
     engine: Handle<Synth>,
     rng: Rng,
 }
@@ -140,6 +150,11 @@ fn setup_sounds(mut commands: Commands, mut synths: ResMut<Assets<Synth>>) {
         dry: add(dry_fire()),
         reload: add(reload()),
         kill: add(kill()),
+        barks: (0..3).map(|i| add(bark(i))).collect(),
+        bite: add(bite()),
+        yelp: add(yelp()),
+        hurt: add(hurt()),
+        switch: add(switch()),
         engine: add(engine()),
         rng: Rng(rng.next()),
     };
@@ -163,6 +178,11 @@ fn play_queue(mut commands: Commands, mut queue: ResMut<SoundQueue>, mut sounds:
             Sfx::DryFire => sounds.dry.clone(),
             Sfx::Reload => sounds.reload.clone(),
             Sfx::Kill => sounds.kill.clone(),
+            Sfx::Bark => pick(&sounds.barks, rng),
+            Sfx::Bite => sounds.bite.clone(),
+            Sfx::Yelp => sounds.yelp.clone(),
+            Sfx::Hurt => sounds.hurt.clone(),
+            Sfx::Switch => sounds.switch.clone(),
         };
         // A little pitch variety keeps repeats from sounding mechanical.
         let speed = sounds.rng.range(0.94, 1.06);
@@ -388,6 +408,86 @@ fn kill() -> Vec<f32> {
         .collect()
 }
 
+/// A dog's bark: a short harsh tone falling in pitch, rough with noise; variants differ in pitch.
+fn bark(variant: u64) -> Vec<f32> {
+    let mut rng = Rng(0xBA4C + variant);
+    let n = len(0.22);
+    let base = 330.0 + variant as f32 * 60.0;
+    let mut phase = 0.0f32;
+    let a = lp(2000.0);
+    let mut y = 0.0;
+    (0..n)
+        .map(|i| {
+            let t = i as f32 / RATE as f32;
+            phase += std::f32::consts::TAU * base * (1.0 - 0.45 * t / 0.22) / RATE as f32;
+            // A clipped (square-ish) tone is harsher than a sine.
+            let tone = (phase.sin() * 3.0).clamp(-1.0, 1.0) + (phase * 2.0).sin() * 0.4;
+            y += a * (noise(&mut rng) - y);
+            let env = (t / 0.01).min(1.0) * (-t * 12.0).exp();
+            (tone * 0.7 + y * 1.2) * env
+        })
+        .collect()
+}
+
+/// A bite: a low snarl and a snap of teeth.
+fn bite() -> Vec<f32> {
+    let mut rng = Rng(0xB17E);
+    let n = len(0.35);
+    let a = lp(600.0);
+    let (mut y, mut phase) = (0.0, 0.0f32);
+    (0..n)
+        .map(|i| {
+            let t = i as f32 / RATE as f32;
+            phase += std::f32::consts::TAU * (120.0 + 30.0 * (t * 40.0).sin()) / RATE as f32;
+            y += a * (noise(&mut rng) - y);
+            let snarl = (phase.sin() * 0.6 + y * 2.0) * (-t * 6.0).exp();
+            let snap = if (0.12..0.125).contains(&t) {
+                noise(&mut rng) * 2.0
+            } else {
+                0.0
+            };
+            snarl + snap
+        })
+        .collect()
+}
+
+/// A dog's death yelp: a high whine sliding down.
+fn yelp() -> Vec<f32> {
+    let n = len(0.5);
+    let mut phase = 0.0f32;
+    (0..n)
+        .map(|i| {
+            let t = i as f32 / RATE as f32;
+            phase += std::f32::consts::TAU * (1100.0 - 700.0 * t / 0.5) / RATE as f32;
+            let env = (t / 0.01).min(1.0) * (-t * 5.0).exp();
+            ((phase.sin() * 2.0).clamp(-1.0, 1.0) * 0.7 + (phase * 0.5).sin() * 0.3) * env
+        })
+        .collect()
+}
+
+/// The player hurt: a short low grunt.
+fn hurt() -> Vec<f32> {
+    let mut rng = Rng(0x4C27);
+    let n = len(0.25);
+    let a = lp(700.0);
+    let (mut y, mut phase) = (0.0, 0.0f32);
+    (0..n)
+        .map(|i| {
+            let t = i as f32 / RATE as f32;
+            phase += std::f32::consts::TAU * (150.0 - 50.0 * t / 0.25) / RATE as f32;
+            y += a * (noise(&mut rng) - y);
+            let env = (t / 0.02).min(1.0) * (-t * 9.0).exp();
+            ((phase.sin() * 1.5).clamp(-1.0, 1.0) * 0.7 + y * 1.0) * env
+        })
+        .collect()
+}
+
+/// The flashlight switch: a small plastic click.
+fn switch() -> Vec<f32> {
+    let mut rng = Rng(0x5117);
+    click(&mut rng, len(0.04), 0.0, 3500.0)
+}
+
 /// Engine loop (1 s, seamless): a 50 Hz hum with harmonics (whole cycles per loop) and a low rumble,
 /// cross-faded at the seam.
 fn engine() -> Vec<f32> {
@@ -432,6 +532,11 @@ mod tests {
             hit(0),
             hit(2),
             kill(),
+            bark(1),
+            bite(),
+            yelp(),
+            hurt(),
+            switch(),
             engine(),
         ];
         for s in all {

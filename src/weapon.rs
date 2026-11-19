@@ -4,7 +4,7 @@
 //! stays `MARK_LIFE` seconds plus a burst of sparks. Hits on cars and props only spark (they move or change).
 //! Each shot leaves the center at a random angle inside a cone: its radius grows with movement (still,
 //! walk, run, in the air) and with each quick follow-up shot (the streak cools down between shots).
-//! Shots hit the strange figures too (`Shootable`): a hit one is `Killed` (the watchers module plays its
+//! Shots hit strangers and dogs too (`Shootable`): a hit one is `Killed` (its own module plays its
 //! death) and dark red bits spray instead of sparks.
 //! Empty, the slide locks back and a click only twitches the pistol (dry fire).
 //! `MAGAZINE` rounds; R reloads with an animation (the pistol cants, the magazine drops out, a new one
@@ -21,7 +21,7 @@ use crate::level::{Level, PropBoxes, Rng, ray_box};
 use crate::optic::Optic;
 use crate::player::{Motion, Player};
 use crate::sound::{Sfx, SoundQueue};
-use crate::watchers::{Killed, Shootable};
+use crate::targets::{Killed, Kind, Shootable};
 
 pub struct WeaponPlugin;
 
@@ -413,14 +413,18 @@ fn fire(
         .iter()
         .filter_map(|(e, tf, s)| {
             let bx = s.aabb(tf.translation);
-            ray_box(o, dir, t, &bx).map(|h| (e, h))
+            ray_box(o, dir, t, &bx).map(|h| (e, s.kind, h))
         })
-        .min_by(|a, b| a.1.0.total_cmp(&b.1.0));
-    if let Some((e, (ft, fnormal))) = figure {
+        .min_by(|a, b| a.2.0.total_cmp(&b.2.0));
+    if let Some((e, kind, (ft, fnormal))) = figure {
         commands.entity(e).insert(Killed::default());
         let hit = o + dir * ft;
         sound.play(Sfx::Hit, Some(hit), 1.0);
-        sound.play(Sfx::Kill, Some(hit), 1.0);
+        let cry = match kind {
+            Kind::Stranger => Sfx::Kill,
+            Kind::Dog => Sfx::Yelp,
+        };
+        sound.play(cry, Some(hit), 1.0);
         burst(
             &mut commands,
             &assets.cube,

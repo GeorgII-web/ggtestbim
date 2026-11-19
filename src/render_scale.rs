@@ -1,7 +1,7 @@
 //! Render resolution: the 3D camera draws into an image of a fixed height (720 by default, width from the
 //! window's aspect), and a 2D camera shows it stretched over the whole window (linear filtering) under the
 //! UI. The integrated GPU pays per pixel, so a big or full-screen window costs no more than HD; the HUD and
-//! the optic stay sharp because the UI renders at full size on the 2D camera. F cycles `HEIGHTS` (0 is the
+//! the optic stay sharp because the UI renders at full size on the 2D camera. F2 cycles `HEIGHTS` (0 is the
 //! window's own resolution); never above the window's.
 
 use bevy::camera::{ImageRenderTarget, RenderTarget};
@@ -93,14 +93,14 @@ fn setup_scale(
     });
 }
 
-/// F cycles the resolution; the image follows the window size.
+/// F2 cycles the resolution; the image follows the window size.
 fn rescale(
     keys: Res<ButtonInput<KeyCode>>,
     window: Single<&Window>,
     mut state: ResMut<RenderScale>,
     mut images: ResMut<Assets<Image>>,
 ) {
-    if keys.just_pressed(KeyCode::KeyF) {
+    if keys.just_pressed(KeyCode::F2) {
         state.index = (state.index + 1) % HEIGHTS.len();
     }
     let size = target_size(&window, HEIGHTS[state.index]);
