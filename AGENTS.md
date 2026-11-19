@@ -14,7 +14,7 @@ Personal 3D game in Rust on [Bevy](https://bevyengine.org) 0.20, target Windows 
 | `src/watchers.rs` | tall dark figures, up to 2 per new chunk (80 % each), at its spots: behind windows of every floor, pressed to building corners (peeking), on roof corners; facing the player; within 20 m they jump to a spot over 30 m away or hide; once looked at, they move as soon as they are off screen; unseen, they may wander. Never catchable |
 | `src/clouds.rs` | 45 random sphere clouds 90–140 m up, drifting with the wind, recycled with a new shape on the far side when out of range |
 | `src/optic.rs` | rifle-scope optic: right click on/off (10x), wheel zoom 2–30x, FOV and mouse look scaled by the zoom, overlay with a generated reticle texture (black outside the lens, rim shade, crosshair with posts and mil dots) under the HUD, zoom label |
-| `src/hud.rs` | top line: `~ help` at the left (~ unfolds the controls), compass strip with the heading right of it at the center, fps at the right |
+| `src/hud.rs` | top line: `~ help` at the left (~ unfolds the controls), compass strip (S in red) with the heading right of it at the center, fps at the right |
 
 Geometry rules the collider relies on: walls, slabs and steps are boxes; a stair step rises 0.25 m (under the 0.55 m
 step-up); stair flights never lie inside another flight's head room (switchback lanes); slabs are at least 0.2 m thick (above the 0.15 m substep); no two boxes share a visible face plane

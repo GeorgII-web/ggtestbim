@@ -28,6 +28,16 @@ R new world | G shadows";
 #[derive(Component)]
 struct Compass;
 
+/// The compass text after "S": the root `Text` holds the strip up to S, this span the red S, the next one
+/// the rest. Without an S in view the root holds everything and the spans are empty.
+#[derive(Component)]
+struct CompassSouth;
+
+#[derive(Component)]
+struct CompassRest;
+
+const SOUTH_COLOR: Color = Color::srgb(0.95, 0.2, 0.15);
+
 #[derive(Component)]
 struct Help;
 
@@ -90,6 +100,10 @@ fn setup_compass(mut commands: Commands) {
                 // Left-justified so the marker line lines up with the strip above it.
                 TextLayout::justify(Justify::Left),
                 Compass,
+                children![
+                    (TextSpan::new(""), TextColor(SOUTH_COLOR), CompassSouth),
+                    (TextSpan::new(""), CompassRest),
+                ],
             ));
         });
 }
@@ -99,6 +113,8 @@ fn compass(
     mut fps: Local<f32>,
     camera: Single<&Transform, With<Player>>,
     mut text: Single<&mut Text, With<Compass>>,
+    mut south: Single<&mut TextSpan, (With<CompassSouth>, Without<CompassRest>)>,
+    mut rest: Single<&mut TextSpan, (With<CompassRest>, Without<CompassSouth>)>,
     mut fps_text: Single<&mut Text, (With<Fps>, Without<Compass>)>,
 ) {
     // Frames per second, smoothed over about half a second.
@@ -123,11 +139,19 @@ fn compass(
         "  ".repeat(HALF as usize)
     );
     // Five spaces in front balance the "  297" behind, so the strip stays centered on the screen.
-    text.0 = format!(
+    let all = format!(
         "     {}  {:03.0}\n     {}",
         strip.join(" "),
         heading,
         marker
     );
+    // The strip has at most one S (17 ticks of 15 degrees cover 240).
+    let (head, s, tail) = match all.find('S') {
+        Some(i) => (&all[..i], "S", &all[i + 1..]),
+        None => (all.as_str(), "", ""),
+    };
+    text.0 = head.into();
+    south.0 = s.into();
+    rest.0 = tail.into();
     fps_text.0 = format!("{:.0} fps", *fps);
 }
