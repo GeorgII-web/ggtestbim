@@ -53,7 +53,9 @@ fn setup(mut commands: Commands) {
         Transform::from_xyz(30.0, 60.0, 20.0).looking_at(Vec3::ZERO, Vec3::Y),
         CascadeShadowConfigBuilder {
             num_cascades: 2,
-            first_cascade_far_bound: 15.0,
+            // A short first cascade: up close (stairwells, rooms) one shadow texel covered many screen pixels
+            // and shadow edges showed as large saw teeth; 6 m gives about 2.5x the texel density there.
+            first_cascade_far_bound: 6.0,
             maximum_distance: 50.0,
             ..default()
         }
