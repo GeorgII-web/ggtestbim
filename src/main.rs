@@ -12,9 +12,6 @@ mod watchers;
 use bevy::light::{CascadeShadowConfigBuilder, DirectionalLightShadowMap};
 use bevy::prelude::*;
 
-const HELP: &str = "WASD move (runs) | Shift walk | Ctrl crouch | Space jump | mouse look
-Crouch + jump into windows | Click grab mouse | Esc release | R new world | G shadows";
-
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
@@ -59,15 +56,6 @@ fn setup(mut commands: Commands) {
             ..default()
         }
         .build(),
-    ));
-    commands.spawn((
-        Text::new(HELP),
-        Node {
-            position_type: PositionType::Absolute,
-            top: Val::Px(8.0),
-            left: Val::Px(8.0),
-            ..default()
-        },
     ));
 }
 
