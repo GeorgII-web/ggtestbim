@@ -1,4 +1,4 @@
-//! First-person walker: mouse look, WASD with acceleration, running by default, Shift to walk, Ctrl to
+//! First-person walker: mouse look, WASD (instant on the ground, a short glide after release), running by default, Shift to walk, Ctrl to
 //! crouch (fits through windows), Space to jump, gravity, box collision with step-up on stairs and ledges
 //! (also in the air, to climb onto a window sill), snap-down on the way down and a landing dip. Cars and
 //! props (trees, benches) collide too.
@@ -17,19 +17,18 @@ const STAND: f32 = 1.8;
 const CROUCH: f32 = 0.9;
 /// Eye below the top of the body.
 const EYE_DROP: f32 = 0.15;
-const RUN: f32 = 15.0;
-const WALK: f32 = 3.5;
-const CRAWL: f32 = 2.2;
-/// Ground acceleration toward the wished speed (very high: light and instant, full run speed in under 0.1 s), braking
-/// without input,
-/// air control.
-const ACCEL: f32 = 200.0;
-const BRAKE: f32 = 200.0;
+const RUN: f32 = 12.0;
+const WALK: f32 = 3.0;
+const CRAWL: f32 = 2.0;
+/// On the ground a held direction sets the speed at once (a new direction cancels the old motion, so quick
+/// left/right taps react instantly); with no key held the body glides to a stop at this braking (full run:
+/// about 0.25 s and 1.5 m).
+const BRAKE: f32 = 48.0;
 /// Little air control: a jump keeps the speed it took off with.
 const AIR_ACCEL: f32 = 4.0;
-/// Short, heavy jump: apex 0.7 m, about 0.43 s in the air. Enough for a crouched body to reach a 1.0 m
+/// Short, heavy jump: apex 0.94 m, 0.5 s in the air. Enough for a crouched body to reach a 1.0 m
 /// window sill with the air step-up (feet above sill - STEP).
-const JUMP: f32 = 6.5;
+const JUMP: f32 = 7.5;
 const GRAVITY: f32 = 30.0;
 /// A jump still works this long after leaving the ground (coyote time), and a press this long before
 /// landing is kept until the landing (jump buffer); jumping while running at full speed stays reliable.
@@ -215,14 +214,13 @@ fn walk(
         RUN
     };
     let wish = wish.normalize_or_zero() * speed;
-    let accel = match (p.grounded, wish != Vec3::ZERO) {
-        (false, _) => AIR_ACCEL,
-        (true, true) => ACCEL,
-        (true, false) => BRAKE,
-    };
     let horizontal = Vec2::new(p.vel.x, p.vel.z);
-    let horizontal =
-        horizontal + (Vec2::new(wish.x, wish.z) - horizontal).clamp_length_max(accel * dt);
+    let target = Vec2::new(wish.x, wish.z);
+    let horizontal = match (p.grounded, wish != Vec3::ZERO) {
+        (true, true) => target,
+        (true, false) => horizontal + (target - horizontal).clamp_length_max(BRAKE * dt),
+        (false, _) => horizontal + (target - horizontal).clamp_length_max(AIR_ACCEL * dt),
+    };
     p.vel.x = horizontal.x;
     p.vel.z = horizontal.y;
 
