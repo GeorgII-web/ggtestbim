@@ -49,12 +49,17 @@ const SPAWN: Vec3 = Vec3::new(0.0, 0.5, 0.0);
 
 pub struct PlayerPlugin;
 
+/// The player's input, look and movement; systems that use the camera's pose for this frame run after it.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PlayerSet;
+
 impl Plugin for PlayerPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, (spawn_player, grab)).add_systems(
             Update,
             (cursor_toggle, look, walk)
                 .chain()
+                .in_set(PlayerSet)
                 .after(crate::cars::drive)
                 .after(crate::level::prop_boxes),
         );
@@ -164,7 +169,7 @@ fn walk(
     let (mut p, mut tf) = player.into_inner();
     let dt = time.delta_secs().min(1.0 / 30.0);
 
-    if keys.just_pressed(KeyCode::KeyR) || p.pos.y < -30.0 {
+    if keys.just_pressed(KeyCode::KeyN) || p.pos.y < -30.0 {
         p.pos = SPAWN;
         p.vel = Vec3::ZERO;
     }

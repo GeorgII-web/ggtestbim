@@ -23,7 +23,7 @@ const HELP_HINT: &str = "~ help";
 const HELP: &str = "~ help
 WASD move (runs) | Shift walk | Ctrl crouch | Space jump | mouse look
 Ctrl + Space high jump (ledges, windows) | Right click optic, wheel zoom | Click grab mouse | Esc release
-R new world | G shadows";
+Left click shoot | R reload | N new world | G shadows";
 
 #[derive(Component)]
 struct Compass;

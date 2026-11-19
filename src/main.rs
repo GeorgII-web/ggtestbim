@@ -9,6 +9,7 @@ mod optic;
 mod player;
 mod textures;
 mod watchers;
+mod weapon;
 
 use bevy::light::{CascadeShadowConfigBuilder, DirectionalLightShadowMap};
 use bevy::prelude::*;
@@ -35,6 +36,7 @@ fn main() {
             clouds::CloudsPlugin,
             hud::HudPlugin,
             optic::OpticPlugin,
+            weapon::WeaponPlugin,
         ))
         // Shadows only near the player (2 cascades to 50 m, 1024 map): cheap enough for an integrated GPU.
         .insert_resource(DirectionalLightShadowMap { size: 1024 })

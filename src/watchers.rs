@@ -133,8 +133,8 @@ fn spawn_watchers(
     keys: Res<ButtonInput<KeyCode>>,
     old: Query<Entity, With<Watcher>>,
 ) {
-    // A new world (R) brings new buildings: the old watchers leave with them.
-    if keys.just_pressed(KeyCode::KeyR) {
+    // A new world (N) brings new buildings: the old watchers leave with them.
+    if keys.just_pressed(KeyCode::KeyN) {
         for e in &old {
             commands.entity(e).despawn();
         }

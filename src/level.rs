@@ -85,10 +85,46 @@ impl Level {
         })
     }
 
+    /// Nearest level box the ray `o + t * dir` hits within `max` (the chunks around `o`): distance and face normal.
+    pub fn raycast(&self, o: Vec3, dir: Vec3, max: f32) -> Option<(f32, Vec3)> {
+        self.near(o)
+            .iter()
+            .flat_map(|boxes| boxes.iter())
+            .filter_map(|bx| ray_box(o, dir, max, bx))
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+    }
+
     /// Whether the ground under `p` exists yet (the player waits for it, cars outside it are removed).
     pub fn loaded(&self, p: Vec3) -> bool {
         self.chunks.contains_key(&chunk_of(p))
     }
+}
+
+/// First hit of the ray `o + t * dir` (dir normalized, 0 < t < max) on the box: distance and the outward
+/// normal of the face it enters through. A ray starting inside the box doesn't hit it.
+pub(crate) fn ray_box(o: Vec3, dir: Vec3, max: f32, bx: &Aabb) -> Option<(f32, Vec3)> {
+    let (mut t0, mut t1) = (0.0f32, max);
+    let mut normal = Vec3::ZERO;
+    for i in 0..3 {
+        if dir[i].abs() < 1e-6 {
+            if o[i] <= bx.min[i] || o[i] >= bx.max[i] {
+                return None;
+            }
+            continue;
+        }
+        let (u, v) = ((bx.min[i] - o[i]) / dir[i], (bx.max[i] - o[i]) / dir[i]);
+        let (near, far) = (u.min(v), u.max(v));
+        if near > t0 {
+            t0 = near;
+            normal = Vec3::ZERO;
+            normal[i] = -dir[i].signum();
+        }
+        t1 = t1.min(far);
+        if t0 > t1 {
+            return None;
+        }
+    }
+    (normal != Vec3::ZERO).then_some((t0, normal))
 }
 
 /// Slab test: does `a + t * d` for t in 0..1 pass through the box?
@@ -466,7 +502,7 @@ fn stream(
     }
 }
 
-/// R drops the whole world; it is generated anew around the spawn point, where the player module puts
+/// N drops the whole world; it is generated anew around the spawn point, where the player module puts
 /// the player back.
 fn regenerate(
     keys: Res<ButtonInput<KeyCode>>,
@@ -476,7 +512,7 @@ fn regenerate(
     mut meshes: ResMut<Assets<Mesh>>,
     mut level: ResMut<Level>,
 ) {
-    if !keys.just_pressed(KeyCode::KeyR) {
+    if !keys.just_pressed(KeyCode::KeyN) {
         return;
     }
     for e in &parts {
@@ -1648,6 +1684,22 @@ pub(crate) fn test_terrace(e: f32) -> (Vec<Aabb>, Vec<Aabb>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A shot hits the face it enters through, at the right distance, with that face's normal.
+    #[test]
+    fn ray_hits_box_face() {
+        let bx = Aabb {
+            min: Vec3::new(2.0, 0.0, -1.0),
+            max: Vec3::new(3.0, 2.0, 1.0),
+        };
+        let (t, n) = ray_box(Vec3::new(0.0, 1.0, 0.0), Vec3::X, 10.0, &bx).unwrap();
+        assert!((t - 2.0).abs() < 1e-4 && n == Vec3::NEG_X);
+        let down = Vec3::new(0.0, -1.0, 0.0);
+        let (t, n) = ray_box(Vec3::new(2.5, 5.0, 0.0), down, 10.0, &bx).unwrap();
+        assert!((t - 3.0).abs() < 1e-4 && n == Vec3::Y);
+        assert!(ray_box(Vec3::new(0.0, 1.0, 0.0), Vec3::NEG_X, 10.0, &bx).is_none());
+        assert!(ray_box(Vec3::new(0.0, 1.0, 0.0), Vec3::X, 1.5, &bx).is_none());
+    }
 
     /// Every watcher escape runs through free space, and most spots survive the check.
     #[test]
