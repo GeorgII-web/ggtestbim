@@ -1,7 +1,8 @@
-//! Render scale: the 3D camera draws into an image of `scale` x the window's physical size, and a 2D camera
-//! shows it stretched over the whole window (linear filtering) under the UI. The integrated GPU pays per
-//! pixel, so 70 % (about half the pixels) nearly doubles the frame budget; the HUD and the optic stay sharp
-//! because the UI renders at full size on the 2D camera. F cycles the scale through `SCALES`.
+//! Render resolution: the 3D camera draws into an image of a fixed height (720 by default, width from the
+//! window's aspect), and a 2D camera shows it stretched over the whole window (linear filtering) under the
+//! UI. The integrated GPU pays per pixel, so a big or full-screen window costs no more than HD; the HUD and
+//! the optic stay sharp because the UI renders at full size on the 2D camera. F cycles `HEIGHTS` (0 is the
+//! window's own resolution); never above the window's.
 
 use bevy::camera::{ImageRenderTarget, RenderTarget};
 use bevy::prelude::*;
@@ -18,10 +19,10 @@ impl Plugin for RenderScalePlugin {
     }
 }
 
-const SCALES: [f32; 4] = [1.0, 0.85, 0.7, 0.55];
-const START: usize = 2;
+const HEIGHTS: [u32; 4] = [720, 900, 1080, 0];
+const START: usize = 0;
 
-/// The current scale (index into `SCALES`), the scene image and its size in pixels.
+/// The current resolution (index into `HEIGHTS`), the scene image and its size in pixels.
 #[derive(Resource)]
 pub struct RenderScale {
     index: usize,
@@ -30,19 +31,20 @@ pub struct RenderScale {
 }
 
 impl RenderScale {
-    pub fn scale(&self) -> f32 {
-        SCALES[self.index]
+    /// Render height in pixels.
+    pub fn height(&self) -> u32 {
+        self.size.y
     }
 }
 
-fn target_size(window: &Window, scale: f32) -> UVec2 {
-    (Vec2::new(
-        window.physical_width() as f32,
-        window.physical_height() as f32,
-    ) * scale)
-        .round()
-        .as_uvec2()
-        .max(UVec2::ONE)
+/// Image size for render height `height` (0: the window's): the window's aspect, never larger than it.
+fn target_size(window: &Window, height: u32) -> UVec2 {
+    let full = UVec2::new(window.physical_width(), window.physical_height()).max(UVec2::ONE);
+    if height == 0 || height >= full.y {
+        return full;
+    }
+    let width = (full.x as f32 * height as f32 / full.y as f32).round() as u32;
+    UVec2::new(width.max(1), height)
 }
 
 fn setup_scale(
@@ -51,7 +53,7 @@ fn setup_scale(
     window: Single<&Window>,
     camera: Single<Entity, With<Player>>,
 ) {
-    let size = target_size(&window, SCALES[START]);
+    let size = target_size(&window, HEIGHTS[START]);
     let image = images.add(Image::new_target_texture(
         size.x,
         size.y,
@@ -91,7 +93,7 @@ fn setup_scale(
     });
 }
 
-/// F cycles the scale; the image follows the window size.
+/// F cycles the resolution; the image follows the window size.
 fn rescale(
     keys: Res<ButtonInput<KeyCode>>,
     window: Single<&Window>,
@@ -99,9 +101,9 @@ fn rescale(
     mut images: ResMut<Assets<Image>>,
 ) {
     if keys.just_pressed(KeyCode::KeyF) {
-        state.index = (state.index + 1) % SCALES.len();
+        state.index = (state.index + 1) % HEIGHTS.len();
     }
-    let size = target_size(&window, state.scale());
+    let size = target_size(&window, HEIGHTS[state.index]);
     if size == state.size {
         return;
     }

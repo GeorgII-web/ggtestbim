@@ -15,7 +15,7 @@ Personal 3D game in Rust on [Bevy](https://bevyengine.org) 0.20, target Windows 
 | `src/clouds.rs` | 45 random sphere clouds 90–140 m up, drifting with the wind, recycled with a new shape on the far side when out of range |
 | `src/optic.rs` | rifle-scope optic: right click on/off (eases in to the last zoom, first 10x), smooth wheel zoom 2–30x, FOV and mouse look scaled by the zoom, overlay (lens square and black side bars placed in pixels from the window size, no gaps) with a generated reticle texture (black outside the lens, rim shade, crosshair with posts and mil dots) under the HUD, zoom label |
 | `src/weapon.rs` | pistol: first-person model (child of the camera, no shadows), crosshair (dot and four ticks; the gap is the next shot's spread cone on screen, from the same `spread` as the shot, eased), ammo bottom right; left click (mouse grabbed) shoots inside a random cone around the view (radius 0.3° still, 1.2° walking, 3.5° running, 5° in the air, times 1 / 1.6 / 2.3 / 3 for the 1st / 2nd / 3rd / later shot of a quick series; the series cools by one shot per 0.35 s; `Player::motion`) via `Level::raycast` / `ray_box` (cars and props too): muzzle flash with a short point light, recoil, bullet mark on level boxes (thin dark square, 60 s, shrinks the last 3 s, max 300, removed with its chunk) and 9 sparks; hits on figures kill them and spray dark red bits; 12 rounds, R reloads (1.3 s: cant, magazine out down the grip, new one in, slide racked, back); pistol and crosshair hidden behind the optic |
-| `src/render_scale.rs` | render scale: the 3D camera draws into an image at 70 % of the window's physical size (F cycles 100 / 85 / 70 / 55 %), a 2D window camera (`IsDefaultUiCamera`) stretches it under the full-size UI; the HUD shows the scale next to the fps |
+| `src/render_scale.rs` | render resolution: the 3D camera draws into an image 720 px high (width from the window's aspect; F cycles 720 / 900 / 1080 / native, never above the window), a 2D window camera (`IsDefaultUiCamera`) stretches it under the full-size UI; the HUD shows the height next to the fps |
 | `src/hud.rs` | top line: `~ help` at the left (~ unfolds the controls), compass strip (S in red) with the heading right of it at the center, fps at the right |
 
 Geometry rules the collider relies on: walls, slabs and steps are boxes; a stair step rises 0.25 m (under the 0.55 m
@@ -39,7 +39,7 @@ lane, plaza low walls differ in height, benches keep apart), or the faces flicke
 The target machine has an integrated Intel Iris Xe GPU (Vulkan): the cost is per pixel, not geometry (a chunk is ~730
 boxes). MSAA is off, shadows are 2 cascades to 50 m (the first to 6 m, against saw-tooth shadow edges up close) on a 1024 map with the `Hardware2x2` filter, textures use 4×
 anisotropy, 5×5 chunks are loaded with fog at 45–115 m; that measured 50–65 fps (vsync 60), against ~22 fps with
-MSAA 4×, 3–4 cascades and 7×7 chunks. G toggles shadows in game; the HUD shows fps. The window is high-DPI (about 2900×1700 physical): the 3D scene renders at 70 % of it by default (about half the pixels; F cycles the scale). Measure before raising any of these.
+MSAA 4×, 3–4 cascades and 7×7 chunks. G toggles shadows in game; the HUD shows fps. The window is high-DPI (about 2900×1700 physical): the 3D scene renders at 720p by default whatever the window or full-screen size (about a fifth of the pixels; F cycles the resolution). Measure before raising any of these.
 
 ## Rules
 
