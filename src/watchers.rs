@@ -5,6 +5,8 @@
 //! corner or back along the wall, back from the roof edge) and hides there. It disappears only while a wall
 //! or object is between it and the player, and turns up again at another spot of its chunk, far from the
 //! player and out of sight. Only if the player gets within `CATCH` does it vanish in view (never caught).
+//! A bullet kills it (`Killed`, set by the weapon): it falls backwards, its eyes go out, it sinks into the
+//! ground and is removed.
 
 use bevy::prelude::*;
 
@@ -16,7 +18,7 @@ pub struct WatchersPlugin;
 impl Plugin for WatchersPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, setup_watchers)
-            .add_systems(Update, (spawn_watchers, watch).chain());
+            .add_systems(Update, (spawn_watchers, watch, die).chain());
     }
 }
 
@@ -46,6 +48,34 @@ const WANDER_EVERY: f32 = 6.0;
 /// Head height above the feet, the target of the line of sight.
 const HEAD: f32 = 2.3;
 const HIDDEN: Vec3 = Vec3::new(0.0, -500.0, 0.0);
+/// Death: falling over takes `FALL`, then it lies until `LIE`, then sinks into the ground until `SINK`.
+const FALL: f32 = 0.6;
+const LIE: f32 = 2.0;
+const SINK: f32 = 4.0;
+
+/// A figure bullets can hit: its body box around the feet position.
+#[derive(Component)]
+pub(crate) struct Shootable;
+
+impl Shootable {
+    pub(crate) fn aabb(&self, feet: Vec3) -> crate::level::Aabb {
+        crate::level::Aabb {
+            min: feet - Vec3::new(0.25, 0.0, 0.25),
+            max: feet + Vec3::new(0.25, 2.6, 0.25),
+        }
+    }
+}
+
+/// Shot: seconds since the hit; the watcher's behavior stops and `die` plays the death.
+#[derive(Component, Default)]
+pub(crate) struct Killed {
+    t: f32,
+    /// Rotation when hit; it falls backwards from there.
+    from: Option<Quat>,
+}
+
+#[derive(Component)]
+struct Eye;
 
 enum State {
     /// Standing at its spot, watching the player; `seen` counts how long the player has seen it.
@@ -186,6 +216,7 @@ fn spawn_watcher(
                 clock: 0.0,
                 react,
             },
+            Shootable,
         ))
         .with_children(|c| {
             c.spawn(part(
@@ -199,10 +230,13 @@ fn spawn_watcher(
                 &assets.face,
             ));
             for x in [-0.08, 0.08] {
-                c.spawn(part(
-                    Vec3::new(x, 2.4, -0.17),
-                    Vec3::new(0.11, 0.08, 0.02),
-                    &assets.eyes,
+                c.spawn((
+                    part(
+                        Vec3::new(x, 2.4, -0.17),
+                        Vec3::new(0.11, 0.08, 0.02),
+                        &assets.eyes,
+                    ),
+                    Eye,
                 ));
             }
         });
@@ -271,7 +305,7 @@ fn watch(
     time: Res<Time>,
     mut commands: Commands,
     camera: Single<&Transform, (With<Player>, Without<Watcher>)>,
-    mut watchers: Query<(Entity, &mut Watcher, &mut Transform)>,
+    mut watchers: Query<(Entity, &mut Watcher, &mut Transform), Without<Killed>>,
     mut level: ResMut<Level>,
 ) {
     let dt = time.delta_secs();
@@ -340,6 +374,37 @@ fn watch(
         }
         if facing.x != 0.0 || facing.z != 0.0 {
             tf.rotation = Quat::from_rotation_y((-facing.x).atan2(-facing.z));
+        }
+    }
+}
+
+/// Falls backwards (about its feet, away from where it faced), eyes out, lies, sinks, removed.
+fn die(
+    time: Res<Time>,
+    mut commands: Commands,
+    mut dead: Query<(Entity, &mut Killed, &mut Transform, &Children)>,
+    mut eyes: Query<&mut Visibility, With<Eye>>,
+) {
+    for (e, mut k, mut tf, children) in &mut dead {
+        if k.from.is_none() {
+            k.from = Some(tf.rotation);
+            for c in children.iter() {
+                if let Ok(mut v) = eyes.get_mut(c) {
+                    *v = Visibility::Hidden;
+                }
+            }
+        }
+        k.t += time.delta_secs();
+        if k.t > SINK {
+            commands.entity(e).despawn();
+            continue;
+        }
+        // Local -z is its front: tipping about local x by +90 degrees lays it on its back.
+        let fall = (k.t / FALL).min(1.0);
+        let angle = std::f32::consts::FRAC_PI_2 * fall * fall;
+        tf.rotation = k.from.unwrap_or(tf.rotation) * Quat::from_rotation_x(angle);
+        if k.t > LIE {
+            tf.translation.y -= 0.25 * time.delta_secs();
         }
     }
 }

@@ -4,7 +4,10 @@
 //! stays `MARK_LIFE` seconds plus a burst of sparks. Hits on cars and props only spark (they move or change).
 //! Each shot leaves the center at a random angle inside a cone: its radius grows with movement (still,
 //! walk, run, in the air) and with each quick follow-up shot (the streak cools down between shots).
-//! `MAGAZINE` rounds; R reloads (the pistol dips out of view and back), an empty magazine only clicks.
+//! Shots hit the strange figures too (`Shootable`): a hit one is `Killed` (the watchers module plays its
+//! death) and dark red bits spray instead of sparks.
+//! `MAGAZINE` rounds; R reloads with an animation (the pistol cants, the magazine drops out, a new one
+//! slides in, the slide racks), an empty magazine only clicks.
 //! While the optic is up the pistol and crosshair are hidden (the optic has its own reticle); shots still
 //! go to the center.
 
@@ -16,6 +19,7 @@ use crate::cars::CarBoxes;
 use crate::level::{Level, PropBoxes, Rng, ray_box};
 use crate::optic::Optic;
 use crate::player::{Motion, Player};
+use crate::watchers::{Killed, Shootable};
 
 pub struct WeaponPlugin;
 
@@ -88,6 +92,7 @@ struct WeaponAssets {
     cube: Handle<Mesh>,
     mark: Handle<StandardMaterial>,
     spark: Handle<StandardMaterial>,
+    blood: Handle<StandardMaterial>,
 }
 
 #[derive(Component)]
@@ -95,6 +100,14 @@ struct Pistol;
 
 #[derive(Component)]
 struct MuzzleFlash;
+
+/// A part of the slide (it racks back during a reload), with its rest position.
+#[derive(Component)]
+struct Slide(Vec3);
+
+/// The magazine in the grip, with its rest transform.
+#[derive(Component)]
+struct Magazine(Transform);
 
 #[derive(Component)]
 struct FlashLight;
@@ -109,6 +122,7 @@ struct Mark {
 struct Spark {
     vel: Vec3,
     age: f32,
+    size: f32,
 }
 
 #[derive(Component)]
@@ -154,6 +168,17 @@ fn setup_weapon(
             unlit: true,
             ..default()
         }),
+        blood: materials.add(StandardMaterial {
+            base_color: Color::srgb(0.35, 0.02, 0.02),
+            unlit: true,
+            ..default()
+        }),
+    });
+    let mag_steel = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.2, 0.2, 0.21),
+        metallic: 0.5,
+        perceptual_roughness: 0.5,
+        ..default()
     });
     let part = |center: Vec3, size: Vec3, mat: &Handle<StandardMaterial>| {
         (
@@ -171,10 +196,10 @@ fn setup_weapon(
             Pistol,
         ))
         .with_children(|c| {
-            c.spawn(part(
-                Vec3::new(0.0, 0.03, -0.02),
-                Vec3::new(0.032, 0.032, 0.18),
-                &steel,
+            let slide = Vec3::new(0.0, 0.03, -0.02);
+            c.spawn((
+                part(slide, Vec3::new(0.032, 0.032, 0.18), &steel),
+                Slide(slide),
             ));
             c.spawn(part(
                 Vec3::new(0.0, 0.006, -0.03),
@@ -194,10 +219,21 @@ fn setup_weapon(
                 Vec3::new(0.006, 0.02, 0.04),
                 &steel,
             ));
-            c.spawn(part(
-                Vec3::new(0.0, 0.05, -0.105),
-                Vec3::new(0.005, 0.008, 0.006),
-                &steel,
+            let sight = Vec3::new(0.0, 0.05, -0.105);
+            c.spawn((
+                part(sight, Vec3::new(0.005, 0.008, 0.006), &steel),
+                Slide(sight),
+            ));
+            // Magazine: in the grip, its base plate showing under it.
+            let mag = Transform::from_xyz(0.0, -0.06, 0.05)
+                .with_rotation(Quat::from_rotation_x(0.3))
+                .with_scale(Vec3::new(0.026, 0.1, 0.038));
+            c.spawn((
+                Mesh3d(cube.clone()),
+                MeshMaterial3d(mag_steel),
+                mag,
+                NotShadowCaster,
+                Magazine(mag),
             ));
             c.spawn((
                 Mesh3d(cube.clone()),
@@ -257,7 +293,7 @@ fn setup_weapon(
     ));
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn fire(
     mut commands: Commands,
     time: Res<Time>,
@@ -268,6 +304,7 @@ fn fire(
     level: Res<Level>,
     cars: Res<CarBoxes>,
     props: Res<PropBoxes>,
+    figures: Query<(Entity, &Transform, &Shootable), (Without<Killed>, Without<Player>)>,
     assets: Res<WeaponAssets>,
     mut gun: ResMut<Gun>,
 ) {
@@ -327,8 +364,34 @@ fn fire(
         (Some(w), Some(m)) if m.0 < w.0 => (m.0, m.1, false),
         (Some(w), _) => (w.0, w.1, true),
         (None, Some(m)) => (m.0, m.1, false),
-        (None, None) => return,
+        (None, None) => (RANGE, Vec3::ZERO, false),
     };
+    // A figure in front of whatever else the shot hits is killed.
+    let figure = figures
+        .iter()
+        .filter_map(|(e, tf, s)| {
+            let bx = s.aabb(tf.translation);
+            ray_box(o, dir, t, &bx).map(|h| (e, h))
+        })
+        .min_by(|a, b| a.1.0.total_cmp(&b.1.0));
+    if let Some((e, (ft, fnormal))) = figure {
+        commands.entity(e).insert(Killed::default());
+        let hit = o + dir * ft;
+        burst(
+            &mut commands,
+            &assets.cube,
+            &assets.blood,
+            &mut gun.rng,
+            hit,
+            fnormal,
+            14,
+            0.025,
+        );
+        return;
+    }
+    if normal == Vec3::ZERO {
+        return;
+    }
     let hit = o + dir * t;
     if mark {
         // A thin dark square on the face, 2 mm off it; the size jitters a little.
@@ -342,24 +405,62 @@ fn fire(
             Mark { age: 0.0, size },
         ));
     }
-    for _ in 0..SPARKS {
+    burst(
+        &mut commands,
+        &assets.cube,
+        &assets.spark,
+        &mut gun.rng,
+        hit,
+        normal,
+        SPARKS,
+        0.015,
+    );
+}
+
+/// `n` small bits flying off a hit point, mostly along the face normal, falling under gravity.
+#[allow(clippy::too_many_arguments)]
+fn burst(
+    commands: &mut Commands,
+    cube: &Handle<Mesh>,
+    mat: &Handle<StandardMaterial>,
+    rng: &mut Rng,
+    hit: Vec3,
+    normal: Vec3,
+    n: usize,
+    size: f32,
+) {
+    for _ in 0..n {
         let r = Vec3::new(
-            gun.rng.range(-1.0, 1.0),
-            gun.rng.range(-0.3, 1.0),
-            gun.rng.range(-1.0, 1.0),
+            rng.range(-1.0, 1.0),
+            rng.range(-0.3, 1.0),
+            rng.range(-1.0, 1.0),
         );
-        let vel = (normal * 1.2 + r).normalize_or_zero() * gun.rng.range(2.0, 5.0);
+        let vel = (normal * 1.2 + r).normalize_or_zero() * rng.range(2.0, 5.0);
         commands.spawn((
-            Mesh3d(assets.cube.clone()),
-            MeshMaterial3d(assets.spark.clone()),
-            Transform::from_translation(hit + normal * 0.02).with_scale(Vec3::splat(0.015)),
+            Mesh3d(cube.clone()),
+            MeshMaterial3d(mat.clone()),
+            Transform::from_translation(hit + normal * 0.02).with_scale(Vec3::splat(size)),
             NotShadowCaster,
-            Spark { vel, age: 0.0 },
+            Spark {
+                vel,
+                age: 0.0,
+                size,
+            },
         ));
     }
 }
 
-/// Recoil, reload dip, muzzle flash and its light; hidden behind the optic.
+/// Smooth 0..1 over [a, b] of x.
+fn ease(x: f32, a: f32, b: f32) -> f32 {
+    let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// Recoil, the reload, muzzle flash and its light; hidden behind the optic.
+/// Reload over `RELOAD_TIME` (phase 0..1): cant the pistol (0-0.15), magazine out down the grip (0.15-0.35,
+/// then hidden), new magazine up into the grip (0.45-0.7), slide racked back and released (0.75-0.88),
+/// pistol back to rest (0.88-1).
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn animate(
     time: Res<Time>,
     optic: Res<Optic>,
@@ -367,24 +468,61 @@ fn animate(
     mut pistol: Single<(&mut Transform, &mut Visibility), With<Pistol>>,
     mut flash: Single<&mut Visibility, (With<MuzzleFlash>, Without<Pistol>)>,
     mut light: Single<&mut PointLight, With<FlashLight>>,
+    mut slides: Query<(&Slide, &mut Transform), Without<Pistol>>,
+    mut mag: Single<
+        (&Magazine, &mut Transform, &mut Visibility),
+        (Without<Pistol>, Without<Slide>, Without<MuzzleFlash>),
+    >,
 ) {
     let dt = time.delta_secs();
     gun.recoil = (gun.recoil - dt * 8.0).max(0.0);
     gun.flash = (gun.flash - dt).max(0.0);
     let r = gun.recoil * gun.recoil;
-    // Reload: down and tilted out of view, then back.
-    let dip = gun
-        .reload
-        .map(|t| (t / RELOAD_TIME * std::f32::consts::PI).sin())
+    let p = gun.reload.map(|t| t / RELOAD_TIME);
+    let cant = p
+        .map(|p| ease(p, 0.0, 0.15) - ease(p, 0.88, 1.0))
         .unwrap_or(0.0);
     let (tf, vis) = &mut *pistol;
-    tf.translation = REST + Vec3::new(0.0, 0.012 * r - 0.25 * dip, 0.05 * r);
-    tf.rotation = Quat::from_rotation_x(0.25 * r - 0.9 * dip) * Quat::from_rotation_z(0.5 * dip);
+    tf.translation = REST
+        + Vec3::new(
+            -0.04 * cant,
+            0.012 * r + 0.03 * cant,
+            0.05 * r + 0.04 * cant,
+        );
+    tf.rotation = Quat::from_rotation_x(0.25 * r + 0.25 * cant) * Quat::from_rotation_z(0.7 * cant);
     **vis = if optic.on {
         Visibility::Hidden
     } else {
         Visibility::Inherited
     };
+
+    // Magazine: out along the grip's axis, gone, then a new one in.
+    let (rest, mtf, mvis) = &mut *mag;
+    let out = p
+        .map(|p| {
+            if p < 0.4 {
+                ease(p, 0.15, 0.35)
+            } else {
+                1.0 - ease(p, 0.45, 0.7)
+            }
+        })
+        .unwrap_or(0.0);
+    let axis = rest.0.rotation * Vec3::NEG_Y;
+    mtf.translation = rest.0.translation + axis * 0.16 * out;
+    **mvis = if p.is_some_and(|p| (0.35..0.45).contains(&p)) {
+        Visibility::Hidden
+    } else {
+        Visibility::Inherited
+    };
+
+    // Slide: racked back by the hand, snapping forward; also kicks back a little with each shot.
+    let rack = p
+        .map(|p| ease(p, 0.75, 0.82) - ease(p, 0.84, 0.88))
+        .unwrap_or(0.0);
+    for (slide, mut stf) in &mut slides {
+        stf.translation = slide.0 + Vec3::Z * (0.045 * rack + 0.02 * r);
+    }
+
     let on = gun.flash > 0.0 && !optic.on;
     **flash = if on {
         Visibility::Inherited
@@ -408,7 +546,7 @@ fn sparks(
         }
         s.vel.y -= 9.8 * dt;
         tf.translation += s.vel * dt;
-        tf.scale = Vec3::splat(0.015 * (1.0 - s.age / SPARK_LIFE));
+        tf.scale = Vec3::splat(s.size * (1.0 - s.age / SPARK_LIFE));
     }
 }
 
