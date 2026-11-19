@@ -3,11 +3,13 @@
 
 mod cars;
 mod clouds;
+mod daylight;
 mod hud;
 mod level;
 mod optic;
 mod player;
 mod render_scale;
+mod sound;
 mod textures;
 mod watchers;
 mod weapon;
@@ -39,6 +41,8 @@ fn main() {
             optic::OpticPlugin,
             weapon::WeaponPlugin,
             render_scale::RenderScalePlugin,
+            sound::SoundPlugin,
+            daylight::DaylightPlugin,
         ))
         // Shadows only near the player (2 cascades to 50 m, 1024 map): cheap enough for an integrated GPU.
         .insert_resource(DirectionalLightShadowMap { size: 1024 })

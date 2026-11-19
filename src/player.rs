@@ -93,6 +93,15 @@ pub(crate) enum Motion {
 }
 
 impl Player {
+    /// Horizontal speed in m/s.
+    pub(crate) fn ground_speed(&self) -> f32 {
+        Vec2::new(self.vel.x, self.vel.z).length()
+    }
+
+    pub(crate) fn crouched(&self) -> bool {
+        self.height < STAND
+    }
+
     pub(crate) fn motion(&self) -> Motion {
         let speed = Vec2::new(self.vel.x, self.vel.z).length();
         if !self.grounded {

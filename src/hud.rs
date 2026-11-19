@@ -23,7 +23,8 @@ const HELP_HINT: &str = "~ help";
 const HELP: &str = "~ help
 WASD move (runs) | Shift walk | Ctrl crouch | Space jump | mouse look
 Ctrl + Space high jump (ledges, windows) | Right click optic, wheel zoom | Click grab mouse | Esc release
-Left click shoot | R reload | N new world | G shadows | F render resolution";
+Left click shoot | R reload | N new world | G shadows | F render resolution
+The clock under the fps: day and night pass in 20 minutes";
 
 #[derive(Component)]
 struct Compass;

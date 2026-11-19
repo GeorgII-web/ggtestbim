@@ -35,7 +35,7 @@ const LOOK_AHEAD: f32 = 10.0;
 pub(crate) struct Car {
     along_x: bool,
     dir: f32,
-    speed: f32,
+    pub(crate) speed: f32,
     cruise: f32,
 }
 

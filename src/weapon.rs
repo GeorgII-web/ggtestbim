@@ -6,6 +6,7 @@
 //! walk, run, in the air) and with each quick follow-up shot (the streak cools down between shots).
 //! Shots hit the strange figures too (`Shootable`): a hit one is `Killed` (the watchers module plays its
 //! death) and dark red bits spray instead of sparks.
+//! Empty, the slide locks back and a click only twitches the pistol (dry fire).
 //! `MAGAZINE` rounds; R reloads with an animation (the pistol cants, the magazine drops out, a new one
 //! slides in, the slide racks), an empty magazine only clicks.
 //! While the optic is up the pistol and crosshair are hidden (the optic has its own reticle); shots still
@@ -19,6 +20,7 @@ use crate::cars::CarBoxes;
 use crate::level::{Level, PropBoxes, Rng, ray_box};
 use crate::optic::Optic;
 use crate::player::{Motion, Player};
+use crate::sound::{Sfx, SoundQueue};
 use crate::watchers::{Killed, Shootable};
 
 pub struct WeaponPlugin;
@@ -32,6 +34,7 @@ impl Plugin for WeaponPlugin {
             reload: None,
             flash: 0.0,
             streak: 0.0,
+            started_empty: false,
             rng: Rng(0x5EED_F1E1),
         })
         .add_systems(PostStartup, setup_weapon)
@@ -82,6 +85,8 @@ struct Gun {
     reload: Option<f32>,
     /// Seconds of muzzle flash left.
     flash: f32,
+    /// The running reload began with an empty magazine (slide locked back until the release).
+    started_empty: bool,
     /// Shots in the current quick series (0 = the next one is a first shot), cooling down over time.
     streak: f32,
     rng: Rng,
@@ -341,6 +346,7 @@ fn fire(
     figures: Query<(Entity, &Transform, &Shootable), (Without<Killed>, Without<Player>)>,
     assets: Res<WeaponAssets>,
     mut gun: ResMut<Gun>,
+    mut sound: ResMut<SoundQueue>,
 ) {
     let dt = time.delta_secs();
     gun.cooldown -= dt;
@@ -354,16 +360,25 @@ fn fire(
     }
     if keys.just_pressed(KeyCode::KeyR) && gun.reload.is_none() && gun.ammo < MAGAZINE {
         gun.reload = Some(0.0);
+        gun.started_empty = gun.ammo == 0;
+        sound.play(Sfx::Reload, None, 0.6);
     }
     // The click that grabs the mouse doesn't shoot.
     let grabbed = cursor.grab_mode != CursorGrabMode::None;
     if !(grabbed && mouse.just_pressed(MouseButton::Left))
         || gun.reload.is_some()
         || gun.cooldown > 0.0
-        || gun.ammo == 0
     {
         return;
     }
+    if gun.ammo == 0 {
+        // Dry fire: the trigger clicks, the pistol twitches.
+        gun.recoil = 0.3;
+        gun.cooldown = FIRE_GAP;
+        sound.play(Sfx::DryFire, None, 0.7);
+        return;
+    }
+    sound.play(Sfx::Shot, None, 0.8);
     gun.ammo -= 1;
     gun.cooldown = FIRE_GAP;
     gun.recoil = 1.0;
@@ -404,6 +419,8 @@ fn fire(
     if let Some((e, (ft, fnormal))) = figure {
         commands.entity(e).insert(Killed::default());
         let hit = o + dir * ft;
+        sound.play(Sfx::Hit, Some(hit), 1.0);
+        sound.play(Sfx::Kill, Some(hit), 1.0);
         burst(
             &mut commands,
             &assets.cube,
@@ -420,6 +437,7 @@ fn fire(
         return;
     }
     let hit = o + dir * t;
+    sound.play(Sfx::Hit, Some(hit), 1.0);
     if mark {
         // A thin dark square on the face, 2 mm off it; the size jitters a little.
         let s = MARK_SIZE * gun.rng.range(0.8, 1.2);
@@ -543,9 +561,13 @@ fn animate(
     };
 
     // Slide: racked back by the hand, snapping forward; also kicks back a little with each shot.
-    let rack = p
-        .map(|p| ease(p, 0.75, 0.82) - ease(p, 0.84, 0.88))
-        .unwrap_or(0.0);
+    // Empty: locked back. A reload from empty keeps it back until the release snaps it forward.
+    let rack = match p {
+        Some(p) if gun.started_empty => 1.0 - ease(p, 0.84, 0.88),
+        Some(p) => ease(p, 0.75, 0.82) - ease(p, 0.84, 0.88),
+        None if gun.ammo == 0 => 1.0,
+        None => 0.0,
+    };
     for (slide, mut stf) in &mut slides {
         stf.translation = slide.0 + Vec3::Z * (0.045 * rack + 0.02 * r);
     }
