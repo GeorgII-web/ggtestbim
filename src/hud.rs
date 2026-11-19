@@ -22,7 +22,8 @@ const TICK_DEG: i32 = 15;
 const HELP_HINT: &str = "~ help";
 const HELP: &str = "~ help
 WASD move (runs) | Shift walk | Ctrl crouch | Space jump | mouse look
-Crouch + jump into windows | Click grab mouse | Esc release | R new world | G shadows";
+Crouch + jump into windows | Right click optic, wheel zoom | Click grab mouse | Esc release
+R new world | G shadows";
 
 #[derive(Component)]
 struct Compass;

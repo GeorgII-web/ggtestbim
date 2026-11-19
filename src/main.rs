@@ -5,6 +5,7 @@ mod cars;
 mod clouds;
 mod hud;
 mod level;
+mod optic;
 mod player;
 mod textures;
 mod watchers;
@@ -33,6 +34,7 @@ fn main() {
             watchers::WatchersPlugin,
             clouds::CloudsPlugin,
             hud::HudPlugin,
+            optic::OpticPlugin,
         ))
         // Shadows only near the player (2 cascades to 50 m, 1024 map): cheap enough for an integrated GPU.
         .insert_resource(DirectionalLightShadowMap { size: 1024 })

@@ -10,6 +10,7 @@ use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 
 use crate::cars::CarBoxes;
 use crate::level::{Aabb, Level, PropBoxes};
+use crate::optic::Optic;
 
 const RADIUS: f32 = 0.35;
 const STAND: f32 = 1.8;
@@ -37,6 +38,8 @@ const MAX_FALL: f32 = 50.0;
 /// Highest ledge stepped onto without jumping (a stair step is 0.25).
 const STEP: f32 = 0.55;
 const SENSITIVITY: f32 = 0.0006;
+/// Vertical field of view without the optic (it narrows it by its zoom).
+pub(crate) const FOV: f32 = 75.0 * std::f32::consts::PI / 180.0;
 /// Longest move per collision substep, below the thinnest slab (0.2) to avoid tunneling.
 const MAX_SUBSTEP: f32 = 0.15;
 const SPAWN: Vec3 = Vec3::new(0.0, 0.5, 0.0);
@@ -79,7 +82,7 @@ fn spawn_player(mut commands: Commands) {
         Msaa::Off,
         bevy::light::ShadowFilteringMethod::Hardware2x2,
         Projection::Perspective(PerspectiveProjection {
-            fov: 75f32.to_radians(),
+            fov: FOV,
             ..default()
         }),
         DistanceFog {
@@ -135,13 +138,16 @@ fn cursor_toggle(
 fn look(
     motion: Res<AccumulatedMouseMotion>,
     cursor: Single<&CursorOptions, With<PrimaryWindow>>,
+    optic: Res<Optic>,
     mut player: Single<&mut Player>,
 ) {
     if cursor.grab_mode == CursorGrabMode::None {
         return;
     }
-    player.yaw -= motion.delta.x * SENSITIVITY;
-    player.pitch = (player.pitch - motion.delta.y * SENSITIVITY).clamp(-1.54, 1.54);
+    // Through the optic the view turns slower by its zoom, so aiming stays steady.
+    let s = SENSITIVITY / optic.zoom;
+    player.yaw -= motion.delta.x * s;
+    player.pitch = (player.pitch - motion.delta.y * s).clamp(-1.54, 1.54);
 }
 
 fn walk(
