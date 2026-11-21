@@ -23,8 +23,8 @@ const HELP_HINT: &str = "~ help";
 const HELP: &str = "~ help
 WASD move (runs) | Shift walk | Ctrl crouch | Space jump | mouse look
 Ctrl + Space high jump (ledges, windows) | Right click optic, wheel zoom | Click grab mouse | Esc release
-Left click shoot | R reload | N new world | G shadows | F flashlight (you are seen from farther) | T throw a light stick | F2 render resolution
-The clock under the fps: day and night pass in 20 minutes | Radar bottom left: red dogs, pale strangers | Dogs and strangers hear your steps (crouch to sneak) and shots";
+Left click shoot | R reload | N new world | G shadows | F flashlight (you are seen from farther) | 4 throw a light stick (5 min) | E rope: throw at a roof or wall and hang on it, W / S along it, Space or E let go (the rope is gone then) | F2 render resolution
+The clock under the fps: day and night pass in 20 minutes | Radar bottom left: red dogs, pale strangers | Dogs and strangers hear your steps (crouch to sneak) and shots | Deep pits hide glowing artifacts: walk into one to take it";
 
 #[derive(Component)]
 struct Compass;

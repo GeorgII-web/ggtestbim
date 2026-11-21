@@ -1,6 +1,7 @@
 // Release builds on Windows run without a console window.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod artifacts;
 mod cars;
 mod clouds;
 mod daylight;
@@ -14,6 +15,7 @@ mod optic;
 mod player;
 mod radar;
 mod render_scale;
+mod ropes;
 mod sound;
 mod targets;
 mod textures;
@@ -54,7 +56,11 @@ fn main() {
             health::HealthPlugin,
             radar::RadarPlugin,
         ))
-        .add_plugins(lightsticks::LightSticksPlugin)
+        .add_plugins((
+            lightsticks::LightSticksPlugin,
+            ropes::RopesPlugin,
+            artifacts::ArtifactsPlugin,
+        ))
         // Shadows only near the player (2 cascades to 50 m, 1024 map): cheap enough for an integrated GPU.
         .insert_resource(DirectionalLightShadowMap { size: 1024 })
         .add_systems(Startup, setup)

@@ -65,9 +65,10 @@ const SINK: f32 = 4.0;
 #[derive(Resource)]
 struct Spots(Vec<Spot>);
 
-/// The latest call for dogs: where the player was seen, and from where (dogs near the caller come).
+/// The latest call for dogs: where the player is (or a noise was), from where, and whether the stranger sees
+/// the player (then it guides the dogs to the player's exact place; a noise only calls the dogs near it).
 #[derive(Resource)]
-pub struct DogCall(pub Option<(Vec3, Vec3)>);
+pub struct DogCall(pub Option<(Vec3, Vec3, bool)>);
 
 #[derive(Component)]
 struct Eye;
@@ -344,7 +345,7 @@ fn watch(
         if !matches!(w.state, State::Duck)
             && let Some(n) = noises.0.iter().find(|n| n.0.distance(tf.translation) < n.1)
         {
-            call.0 = Some((n.0, tf.translation));
+            call.0 = Some((n.0, tf.translation, false));
         }
         match &mut w.state {
             State::Move {
@@ -382,9 +383,9 @@ fn watch(
             State::Watch { seen } => {
                 let visible = player_sees(&level, eye, forward, head);
                 *seen = if visible { *seen + dt } else { 0.0 };
-                // It sees the player: the dogs near it come.
+                // It sees the player: it guides the dogs to the player.
                 if dist < exposure.0 && !level.blocked(head, eye) {
-                    call.0 = Some((player.feet(), tf.translation));
+                    call.0 = Some((player.feet(), tf.translation, true));
                 }
                 if *seen > w.react || dist < FLEE || w.clock > w.linger {
                     go_back(w, &level, eye);

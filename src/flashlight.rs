@@ -22,7 +22,7 @@ impl Plugin for FlashlightPlugin {
 const DAY_RANGE: f32 = 50.0;
 const NIGHT_RANGE: f32 = 22.0;
 const LIGHT_RANGE: f32 = 70.0;
-const LUMENS: f32 = 1_000_000.0;
+const LUMENS: f32 = 4_000_000.0;
 
 /// How far (m) strangers and dogs can see the player right now.
 #[derive(Resource)]
@@ -40,7 +40,7 @@ fn setup_flashlight(mut commands: Commands, camera: Single<Entity, With<Player>>
         .spawn((
             SpotLight {
                 intensity: 0.0,
-                range: 45.0,
+                range: 90.0,
                 color: Color::srgb(1.0, 0.95, 0.85),
                 inner_angle: 0.25,
                 outer_angle: 0.45,

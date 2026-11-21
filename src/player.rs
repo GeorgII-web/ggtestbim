@@ -2,6 +2,9 @@
 //! crouch (fits through windows), Space to jump, gravity, box collision with step-up on stairs and ledges
 //! (also in the air, to climb onto a window sill), snap-down on the way down and a landing dip. Cars and
 //! props (trees, benches) collide too.
+//! On a rope (`Ride`, thrown by the ropes module) the player hangs `HANG` below it: W / S move
+//! along it toward / away from where the view points, Space lets go; at the rope's far end the player climbs
+//! onto the surface it is tied to when there is room (over a parapet or a ledge too), else lets go.
 //! Click grabs the mouse, Esc releases it.
 
 use bevy::input::mouse::AccumulatedMouseMotion;
@@ -46,6 +49,19 @@ pub(crate) const FOV: f32 = 75.0 * std::f32::consts::PI / 180.0;
 /// Longest move per collision substep, below the thinnest slab (0.2) to avoid tunneling.
 const MAX_SUBSTEP: f32 = 0.15;
 const SPAWN: Vec3 = Vec3::new(0.0, 0.5, 0.0);
+/// Hands above the feet while hanging on a rope; speed along a rope.
+pub(crate) const HANG: f32 = 1.9;
+const ROPE_SPEED: f32 = 5.0;
+
+/// Hanging on the rope from `a` to `b` at `t` (0 at `a`, 1 at `b`); `nb` is the normal of the surface the
+/// rope is tied to at `b` (the end at `a` hangs in the air where it was thrown from).
+#[derive(Clone, Copy)]
+pub(crate) struct Ride {
+    pub(crate) a: Vec3,
+    pub(crate) b: Vec3,
+    pub(crate) t: f32,
+    pub(crate) nb: Vec3,
+}
 
 pub struct PlayerPlugin;
 
@@ -89,6 +105,8 @@ pub struct Player {
     pub(crate) dead: bool,
     /// Seconds since the last (re)spawn or new world (dogs keep away for a while).
     pub(crate) since_spawn: f32,
+    /// On a rope.
+    pub(crate) rope: Option<Ride>,
 }
 
 /// How the player moves right now, for the gun's spread.
@@ -119,6 +137,7 @@ impl Player {
         self.since_hurt = f32::MAX;
         self.dead = false;
         self.since_spawn = 0.0;
+        self.rope = None;
     }
 
     /// Feet position.
@@ -183,6 +202,7 @@ fn spawn_player(mut commands: Commands) {
             since_hurt: f32::MAX,
             dead: false,
             since_spawn: 0.0,
+            rope: None,
         },
     ));
 }
@@ -247,9 +267,12 @@ fn walk(
         p.pos = SPAWN;
         p.vel = Vec3::ZERO;
         p.since_spawn = 0.0;
+        p.rope = None;
     }
-    // Wait until the chunk under the player is generated.
+    // Wait until the chunk under the player is generated. The camera moves there anyway: chunks stream around
+    // it, so after a respawn far from where the player died it must stand at the spawn point to load it.
     if !level.loaded(p.pos) {
+        tf.translation = p.pos + Vec3::Y * (p.eye - p.dip);
         return;
     }
     // One pass over the nearby chunks, cars and props keeps only the boxes this frame's move can touch;
@@ -269,6 +292,13 @@ fn walk(
         .copied()
         .collect();
     let near = [&local[..]];
+
+    if let Some(ride) = p.rope.take() {
+        ride_rope(&mut p, ride, &keys, &level, &near, dt);
+        tf.translation = p.pos + Vec3::Y * (p.eye - p.dip);
+        tf.rotation = Quat::from_euler(EulerRot::YXZ, p.yaw, p.pitch, 0.0);
+        return;
+    }
 
     let crouch_key = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
     // Crouching starts only on the ground (Ctrl in the air does nothing); a crouch begun on the ground holds
@@ -350,6 +380,80 @@ fn walk(
 
     tf.translation = p.pos + Vec3::Y * (p.eye - p.dip);
     tf.rotation = Quat::from_euler(EulerRot::YXZ, p.yaw, p.pitch, 0.0);
+}
+
+/// Along the rope by W / S (the direction the view points along it), stopped by anything in the way; Space
+/// lets go; at the far end climbs onto the surface (or lets go when there is no room), at the thrown-from
+/// end lets go.
+fn ride_rope(
+    p: &mut Player,
+    mut ride: Ride,
+    keys: &ButtonInput<KeyCode>,
+    level: &Level,
+    near: &[&[Aabb]],
+    dt: f32,
+) {
+    p.vel = Vec3::ZERO;
+    p.grounded = false;
+    p.height = STAND;
+    if keys.just_pressed(KeyCode::Space) {
+        return;
+    }
+    let ab = ride.b - ride.a;
+    let len = ab.length().max(0.1);
+    let view = Quat::from_euler(EulerRot::YXZ, p.yaw, p.pitch, 0.0) * Vec3::NEG_Z;
+    let toward_b = if view.dot(ab) >= 0.0 { 1.0 } else { -1.0 };
+    let mut go = 0.0;
+    if keys.pressed(KeyCode::KeyW) {
+        go += toward_b;
+    }
+    if keys.pressed(KeyCode::KeyS) {
+        go -= toward_b;
+    }
+    let t = (ride.t + go * ROPE_SPEED * dt / len).clamp(0.0, 1.0);
+    let feet = ride.a.lerp(ride.b, t) - Vec3::Y * HANG;
+    let free = !hits(near, feet, STAND);
+    if free {
+        ride.t = t;
+        p.pos = feet;
+    }
+    let left = (1.0 - ride.t) * len;
+    if go > 0.0 && (left < 0.4 || (!free && left < 3.0)) {
+        if let Some(f) = climb_spot(level, ride.b, ride.nb) {
+            p.pos = f;
+            p.grounded = true;
+        }
+        return;
+    }
+    if go < 0.0 && ride.t * len < 0.2 {
+        return;
+    }
+    p.rope = Some(ride);
+}
+
+/// Where to stand at a rope's end `b` on a surface with normal `n`: on it (a floor or roof), over the edge
+/// behind it (a parapet or ledge up to 2.5 m above), or on a floor in front of it; the body must fit.
+fn climb_spot(level: &Level, b: Vec3, n: Vec3) -> Option<Vec3> {
+    let near = level.near(b);
+    let fits = |f: Vec3| (!hits(&near, f, STAND)).then_some(f);
+    let floor_under = |p: Vec3, drop: f32| {
+        level
+            .raycast(p, Vec3::NEG_Y, drop)
+            .filter(|h| h.1.y > 0.5)
+            .map(|h| p - Vec3::Y * h.0)
+    };
+    if n.y > 0.5 {
+        return fits(b + Vec3::Y * 0.01);
+    }
+    if n.y < -0.5 {
+        return None;
+    }
+    let flat = Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
+    [0.6, 1.0, 1.5]
+        .iter()
+        .filter_map(|&d| floor_under(b - flat * d + Vec3::Y * 2.5, 3.5))
+        .chain(floor_under(b + flat * 0.5, 3.0))
+        .find_map(fits)
 }
 
 /// Moves along x, then z (each blocked or stepped up on its own, so the player slides along walls), then y.
@@ -454,7 +558,7 @@ fn overlap(a: &Aabb, b: &Aabb) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::level::{FH, LANE, T, stair_x0, stair_x1, test_building, test_terrace};
+    use crate::level::{FH, LANE, T, stair_x0, stair_x1, test_building, test_pit, test_terrace};
 
     fn player_at(pos: Vec3) -> Player {
         Player {
@@ -472,6 +576,7 @@ mod tests {
             since_hurt: f32::MAX,
             dead: false,
             since_spawn: 0.0,
+            rope: None,
         }
     }
 
@@ -524,6 +629,25 @@ mod tests {
                 p.pos
             );
         }
+    }
+
+    /// Down a 20 m pit from the street: onto the stairs at the south-west corner, east along the south wall,
+    /// across the corner landing and north along the east wall to the floor.
+    #[test]
+    fn walks_down_into_a_pit() {
+        let depth = 20.0;
+        let (boxes, (x0, z0, x1, z1)) = test_pit(depth);
+        let near = [&boxes[..]];
+        let mut p = player_at(Vec3::new(x0 + 0.7, 0.0, z0 - 1.5));
+        walk_to(&mut p, &near, Vec2::new(x0 + 0.7, z0 + 0.7), 3.0);
+        walk_to(&mut p, &near, Vec2::new(x1 - 0.7, z0 + 0.7), 12.0);
+        walk_to(&mut p, &near, Vec2::new(x1 - 0.7, z1 - 2.0), 12.0);
+        assert!(
+            (p.pos.y + depth).abs() < 0.1,
+            "expected the pit floor at {}, at {:?}",
+            -depth,
+            p.pos
+        );
     }
 
     /// Up the flight beside a 6 m terrace from the street, then sideways onto the terrace.

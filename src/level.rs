@@ -1,5 +1,7 @@
 //! Procedural city on several levels: a street grid of blocks raised on terraces (stairs up from the street),
-//! each block a building (rooms, doors, windows, stairs up to a walkable roof), an open plaza or a park.
+//! each block a building (rooms, doors, windows, stairs up to a walkable roof; a rectangular core, often
+//! with wings that make an L, T, U or cross shape, sometimes a tower of 10-18 floors), an open plaza, a park
+//! or a deep pit (stairs down along its walls, anomaly artifacts at the bottom).
 //! Neighbouring buildings are joined over the street by covered corridors between upper floors or open
 //! bridges between roofs, with stairs where the heights differ.
 //! Everything is an axis-aligned box: the list is the collision world of the player, and the boxes of each
@@ -26,6 +28,7 @@ impl Plugin for LevelPlugin {
             rng: Rng(seed),
             new_chunks: Vec::new(),
             new_spots: Vec::new(),
+            new_artifacts: Vec::new(),
         })
         .insert_resource(PropBoxes(Vec::new()))
         .add_systems(Startup, (setup_palette, initial_load).chain())
@@ -52,6 +55,8 @@ pub struct Level {
     pub(crate) new_chunks: Vec<IVec2>,
     /// Watcher spots of the chunks generated since the watchers module last took them.
     pub(crate) new_spots: Vec<Vec<Spot>>,
+    /// Artifact places (pit bottoms) of the chunks generated since the artifacts module last took them.
+    pub(crate) new_artifacts: Vec<Vec3>,
 }
 
 struct Chunk {
@@ -94,6 +99,17 @@ impl Level {
             .min_by(|a, b| a.0.total_cmp(&b.0))
     }
 
+    /// Copies of the level boxes overlapping the region from `min` to `max` (the chunks around its center),
+    /// for searches that test many short segments.
+    pub fn boxes_in(&self, min: Vec3, max: Vec3) -> Vec<Aabb> {
+        self.near((min + max) / 2.0)
+            .iter()
+            .flat_map(|boxes| boxes.iter())
+            .filter(|b| b.max.cmpgt(min).all() && b.min.cmplt(max).all())
+            .copied()
+            .collect()
+    }
+
     /// Whether the ground under `p` exists yet (the player waits for it, cars outside it are removed).
     pub fn loaded(&self, p: Vec3) -> bool {
         self.chunks.contains_key(&chunk_of(p))
@@ -125,6 +141,14 @@ pub(crate) fn ray_box(o: Vec3, dir: Vec3, max: f32, bx: &Aabb) -> Option<(f32, V
         }
     }
     (normal != Vec3::ZERO).then_some((t0, normal))
+}
+
+/// Whether one of `boxes` cuts the segment from `a` to `b`.
+pub(crate) fn segment_blocked(boxes: &[Aabb], a: Vec3, b: Vec3) -> bool {
+    let (lo, hi, d) = (a.min(b), a.max(b), b - a);
+    boxes
+        .iter()
+        .any(|bx| !(bx.max.cmplt(lo).any() || bx.min.cmpgt(hi).any()) && segment_hits(a, d, bx))
 }
 
 /// Slab test: does `a + t * d` for t in 0..1 pass through the box?
@@ -349,9 +373,11 @@ fn setup_palette(
         .map(|m| {
             let mut mat = materials.get(m).expect("material just added").clone();
             mat.occlusion_texture = Some(shade.clone());
-            // A faint glow of its own (textured like the surface), so rooms are never fully dark.
+            // A faint glow of its own (textured like the surface), so rooms are never fully dark. Scaled by
+            // the camera exposure like the lights (Bevy's default weight 0 shows it as raw HDR, far too bright).
             mat.emissive = mat.base_color.to_linear() * INDOOR_GLOW;
             mat.emissive_texture = mat.base_color_texture.clone();
+            mat.emissive_exposure_weight = 1.0;
             materials.add(mat)
         })
         .collect();
@@ -446,7 +472,7 @@ fn stream(
     missing.sort_by_key(|&c| (c - center).length_squared());
     for c in missing.into_iter().take(max_loads) {
         let seed = level.rng.next();
-        let (parts, props, spots, rooms) = generate(seed, c);
+        let (parts, props, spots, rooms, artifacts) = generate(seed, c);
         let mut groups: Vec<Vec<Aabb>> = vec![Vec::new(); MATS];
         for (b, mat) in &parts {
             groups[mat.index()].push(*b);
@@ -504,6 +530,7 @@ fn stream(
         level.chunks.insert(c, Chunk { boxes, entities });
         level.new_chunks.push(c);
         level.new_spots.push(spots);
+        level.new_artifacts.extend(artifacts);
     }
 }
 
@@ -618,8 +645,8 @@ fn haunt(
 /// Share of the sky's ambient light that reaches faces inside buildings.
 const INDOOR_AMBIENT: f32 = 0.15;
 /// Indoor faces also glow by themselves at this many nits times their color (about the light a room gets
-/// from an ambient of 12): dim at night, never black.
-const INDOOR_GLOW: f32 = 12.0;
+/// from an ambient of 15): at night a very dark room with the walls barely visible, never black.
+const INDOOR_GLOW: f32 = 15.0;
 
 /// True when a face (a point just in front of its center) lies in one of the indoor volumes.
 fn indoor(rooms: &[Aabb], p: Vec3) -> bool {
@@ -751,12 +778,73 @@ struct Building {
     xm: f32,
     zm: f32,
     gaps: Vec<Gap>,
+    /// Lower annexes on the sides without passages.
+    wings: Vec<Wing>,
+}
+
+/// An annex built against one side of a building's core (`side` as in `Gap`): one open room per floor,
+/// windows, a street door on its far wall, a door into the core on every floor and one from the core out
+/// onto its roof when the core is higher.
+struct Wing {
+    side: u32,
+    x0: f32,
+    z0: f32,
+    x1: f32,
+    z1: f32,
+    floors: u32,
 }
 
 enum Kind {
     Building(Building),
     Plaza,
     Park,
+    /// A pit dug from the street.
+    Pit(PitPlan),
+}
+
+/// A pit's hole (world x / z), depth, and how its stair layout is turned: built in a local frame with the
+/// stairs starting at the local south-west corner, then `swap` exchanges the axes and `flip_x` / `flip_z`
+/// mirror them, so the stairs start in any corner and turn either way.
+#[derive(Clone, Copy)]
+struct PitPlan {
+    x0: f32,
+    z0: f32,
+    x1: f32,
+    z1: f32,
+    depth: f32,
+    swap: bool,
+    flip_x: bool,
+    flip_z: bool,
+}
+
+impl PitPlan {
+    /// A point of the pit's local frame in the world.
+    fn world(self, l: Vec3) -> Vec3 {
+        let (a, c) = if self.swap { (l.z, l.x) } else { (l.x, l.z) };
+        let x = if self.flip_x {
+            self.x1 - a
+        } else {
+            self.x0 + a
+        };
+        let z = if self.flip_z {
+            self.z1 - c
+        } else {
+            self.z0 + c
+        };
+        Vec3::new(x, l.y, z)
+    }
+}
+
+/// What stands in one quarter of a pit floor.
+#[derive(Clone, Copy)]
+enum Feature {
+    Empty,
+    Pillars,
+    Ruin,
+    Platform,
+    Mound,
+    Pool,
+    Boulder,
 }
 
 struct Block {
@@ -788,6 +876,8 @@ struct Builder {
     /// Indoor air volumes (inside the outer walls of buildings and covered corridors): faces in them get
     /// the indoor materials.
     rooms: Vec<Aabb>,
+    /// Where anomaly artifacts float (pit bottoms).
+    artifacts: Vec<Vec3>,
 }
 
 /// A movable object (tree, bench): its own entity, so it can change while the player looks away.
@@ -798,7 +888,8 @@ struct Prop {
 }
 
 /// Random character of a chunk: share of buildings and plazas (the rest are parks), floor count range,
-/// highest hill in terrace levels, number of hills, share of building pairs joined by a passage.
+/// highest hill in terrace levels, number of hills, share of building pairs joined by a passage, chance of
+/// a building being a tower, chance of one block being a pit.
 struct Theme {
     building: f32,
     plaza: f32,
@@ -806,24 +897,38 @@ struct Theme {
     peak: f32,
     hills: u32,
     connect: f32,
+    tower: f32,
+    pit: f32,
 }
+
+/// Tower floor range; pit margin to the block edge, depth range and stair width; wing depth range.
+const TOWER: (u32, u32) = (10, 18);
+const PIT_MARGIN: f32 = 1.0;
+const PIT_STAIR: f32 = 1.4;
+/// Pit kinds: (chance, side range, depth range): a narrow deep shaft, a wide shallow crater, a pit between.
+type Range = (f32, f32);
+const PIT_KINDS: [(f32, Range, Range); 3] = [
+    (0.35, (9.0, 13.0), (16.0, 32.0)),
+    (0.3, (16.0, 20.0), (4.0, 8.0)),
+    (0.35, (12.0, 20.0), (8.0, 22.0)),
+];
+const WING: (f32, f32) = (3.5, 7.0);
 
 /// One chunk: ground, road marks, then blocks and passages from a theme picked at random.
 #[allow(clippy::type_complexity)]
-fn generate(seed: u64, chunk: IVec2) -> (Vec<(Aabb, Mat)>, Vec<Prop>, Vec<Spot>, Vec<Aabb>) {
+fn generate(
+    seed: u64,
+    chunk: IVec2,
+) -> (Vec<(Aabb, Mat)>, Vec<Prop>, Vec<Spot>, Vec<Aabb>, Vec<Vec3>) {
     let mut b = Builder {
         rng: Rng(seed),
         parts: Vec::new(),
         props: Vec::new(),
         spots: Vec::new(),
         rooms: Vec::new(),
+        artifacts: Vec::new(),
     };
     let origin = chunk.as_vec2() * CHUNK_SIZE;
-    b.add(
-        Vec3::new(origin.x, -1.0, origin.y),
-        Vec3::new(origin.x + CHUNK_SIZE, 0.0, origin.y + CHUNK_SIZE),
-        Mat::Asphalt,
-    );
     b.road_marks(origin);
     let theme = match b.rng.below(4) {
         // Downtown: towers close together, many passages.
@@ -834,6 +939,8 @@ fn generate(seed: u64, chunk: IVec2) -> (Vec<(Aabb, Mat)>, Vec<Prop>, Vec<Spot>,
             peak: 1.0,
             hills: 1,
             connect: 0.9,
+            tower: 0.3,
+            pit: 0.15,
         },
         // Hills: high terraces with plazas.
         1 => Theme {
@@ -843,6 +950,8 @@ fn generate(seed: u64, chunk: IVec2) -> (Vec<(Aabb, Mat)>, Vec<Prop>, Vec<Spot>,
             peak: 5.0,
             hills: 2,
             connect: 0.6,
+            tower: 0.05,
+            pit: 0.3,
         },
         // Parkland: low houses among parks.
         2 => Theme {
@@ -852,6 +961,8 @@ fn generate(seed: u64, chunk: IVec2) -> (Vec<(Aabb, Mat)>, Vec<Prop>, Vec<Spot>,
             peak: 2.0,
             hills: 2,
             connect: 0.5,
+            tower: 0.03,
+            pit: 0.4,
         },
         _ => Theme {
             building: 0.55,
@@ -860,10 +971,14 @@ fn generate(seed: u64, chunk: IVec2) -> (Vec<(Aabb, Mat)>, Vec<Prop>, Vec<Spot>,
             peak: 3.0,
             hills: 2,
             connect: 0.7,
+            tower: 0.1,
+            pit: 0.25,
         },
     };
     let mut blocks = b.plan(chunk, &theme);
+    b.ground(origin, &blocks);
     let passages = b.connect(&mut blocks, &theme);
+    b.wings(&mut blocks);
     for block in &blocks {
         b.terrace(block);
         let (x0, z0, e) = (block.x0, block.z0, block.e);
@@ -871,22 +986,31 @@ fn generate(seed: u64, chunk: IVec2) -> (Vec<(Aabb, Mat)>, Vec<Prop>, Vec<Spot>,
             Kind::Building(bl) => b.building(bl, e),
             Kind::Plaza => b.plaza(x0, z0, x0 + BLOCK, z0 + BLOCK, e),
             Kind::Park => b.park(x0, z0, x0 + BLOCK, z0 + BLOCK, e),
+            Kind::Pit(plan) => b.pit(plan),
         }
     }
     for p in &passages {
         b.passage(p);
     }
-    // Escapes that run into a box (a window next to an interior wall) are dropped, and spots left without one.
+    // Spots inside a box (a corner covered by a wing) are dropped; escapes that run into a box (a window next
+    // to an interior wall) too, and spots left without one.
     let spots = b
         .spots
         .into_iter()
         .filter_map(|mut spot| {
             let pos = spot.pos;
+            let chest = pos + Vec3::Y * 1.2;
+            if b.parts
+                .iter()
+                .any(|(bx, _)| chest.cmpgt(bx.min).all() && chest.cmplt(bx.max).all())
+            {
+                return None;
+            }
             spot.escapes.retain(|e| escape_clear(&b.parts, pos, e));
             (!spot.escapes.is_empty()).then_some(spot)
         })
         .collect();
-    (b.parts, b.props, spots, b.rooms)
+    (b.parts, b.props, spots, b.rooms, b.artifacts)
 }
 
 /// From `pos` through the waypoints, at knee, waist and head height, no box is in the way.
@@ -991,9 +1115,22 @@ impl Builder {
                     .fold(0.0, f32::max)
                     .round();
                 let roll = self.rng.unit();
-                let kind = if roll < theme.building {
-                    let w = self.rng.range(12.0, BLOCK - 3.0);
-                    let d = self.rng.range(12.0, BLOCK - 3.0);
+                let pit = !blocks
+                    .iter()
+                    .any(|b: &Block| matches!(b.kind, Kind::Pit(_)))
+                    && self.rng.chance(theme.pit);
+                let kind = if pit {
+                    Kind::Pit(self.pit_plan(x0, z0))
+                } else if roll < theme.building {
+                    // A core with room for wings, or one filling most of the block.
+                    let (w, d) = if self.rng.chance(0.65) {
+                        (self.rng.range(12.0, 14.0), self.rng.range(10.5, 13.0))
+                    } else {
+                        (
+                            self.rng.range(12.0, BLOCK - 3.0),
+                            self.rng.range(12.0, BLOCK - 3.0),
+                        )
+                    };
                     let bx = x0 + self.rng.range(1.5, BLOCK - w - 1.5);
                     let bz = z0 + self.rng.range(1.5, BLOCK - d - 1.5);
                     let (bx1, bz1) = (bx + w, bz + d);
@@ -1002,25 +1139,30 @@ impl Builder {
                         z0: bz,
                         x1: bx1,
                         z1: bz1,
-                        floors: theme.floors.0
-                            + self.rng.below(theme.floors.1 - theme.floors.0 + 1),
+                        floors: if self.rng.chance(theme.tower) {
+                            TOWER.0 + self.rng.below(TOWER.1 - TOWER.0 + 1)
+                        } else {
+                            theme.floors.0 + self.rng.below(theme.floors.1 - theme.floors.0 + 1)
+                        },
                         wall: Mat::Wall(self.rng.below(WALLS as u32) as u8),
                         floor: Mat::Floor(self.rng.below(FLOORS as u32) as u8),
                         xm: self.rng.range(stair_x1(bx) + 2.0, bx1 - 3.5),
                         zm: self.rng.range(stair_z1(bz) + 3.0, bz1 - 3.5),
                         gaps: Vec::new(),
+                        wings: Vec::new(),
                     })
                 } else if roll < theme.building + theme.plaza {
                     Kind::Plaza
                 } else {
                     Kind::Park
                 };
-                blocks.push(Block {
-                    x0,
-                    z0,
-                    e: level * TERRACE,
-                    kind,
-                });
+                // A pit is dug from the street level.
+                let e = if matches!(kind, Kind::Pit(_)) {
+                    0.0
+                } else {
+                    level * TERRACE
+                };
+                blocks.push(Block { x0, z0, e, kind });
             }
         }
         blocks
@@ -1148,6 +1290,450 @@ impl Builder {
         passages
     }
 
+    /// The street-level ground of the chunk (1 m of asphalt), with holes over the pits: strips between the
+    /// x edges of the holes, each split along z around the holes it crosses.
+    fn ground(&mut self, origin: Vec2, blocks: &[Block]) {
+        let holes: Vec<(f32, f32, f32, f32)> = blocks
+            .iter()
+            .filter_map(|b| match &b.kind {
+                Kind::Pit(p) => Some((p.x0, p.z0, p.x1, p.z1)),
+                _ => None,
+            })
+            .collect();
+        let (ox, oz, s) = (origin.x, origin.y, CHUNK_SIZE);
+        let mut xs = vec![ox, ox + s];
+        for h in &holes {
+            xs.extend([h.0, h.2]);
+        }
+        xs.sort_by(f32::total_cmp);
+        xs.dedup();
+        for pair in xs.windows(2) {
+            let (xa, xb) = (pair[0], pair[1]);
+            let mut cuts: Vec<(f32, f32)> = holes
+                .iter()
+                .filter(|h| h.0 <= xa && h.2 >= xb)
+                .map(|h| (h.1, h.3))
+                .collect();
+            cuts.sort_by(|a, b| a.0.total_cmp(&b.0));
+            let mut z = oz;
+            for (c0, c1) in cuts.into_iter().chain([(oz + s, oz + s)]) {
+                self.add(Vec3::new(xa, -1.0, z), Vec3::new(xb, 0.0, c0), Mat::Asphalt);
+                z = c1;
+            }
+        }
+    }
+
+    /// Wings for the buildings: up to two, on sides without passage gaps where the block leaves room (at
+    /// least `WING.0` deep plus a 1 m margin), each over part of the side, with a door into the core on each
+    /// of its floors (clear of the stairwell and the interior walls).
+    fn wings(&mut self, blocks: &mut [Block]) {
+        for block in blocks.iter_mut() {
+            let (bx0, bz0) = (block.x0, block.z0);
+            let Kind::Building(bl) = &mut block.kind else {
+                continue;
+            };
+            let mut sides: Vec<u32> = (0..4)
+                .filter(|&s| !bl.gaps.iter().any(|g| g.side == s))
+                .collect();
+            // Shuffle.
+            for i in (1..sides.len()).rev() {
+                let j = self.rng.below(i as u32 + 1) as usize;
+                sides.swap(i, j);
+            }
+            let want = self.rng.below(3) as usize;
+            let mut made = 0;
+            for side in sides {
+                if made >= want {
+                    break;
+                }
+                let room = match side {
+                    0 => bl.z0 - bz0,
+                    1 => bz0 + BLOCK - bl.z1,
+                    2 => bl.x0 - bx0,
+                    _ => bx0 + BLOCK - bl.x1,
+                } - 1.0;
+                if room < WING.0 {
+                    continue;
+                }
+                let depth = self.rng.range(WING.0, room.min(WING.1));
+                let along_x = side < 2;
+                let (c0, c1) = if along_x {
+                    (bl.x0, bl.x1)
+                } else {
+                    (bl.z0, bl.z1)
+                };
+                let span = self.rng.range(5.0, c1 - c0);
+                let u0 = self.rng.range(c0, c1 - span);
+                let u1 = u0 + span;
+                // Door into the core: inside the wing, clear of the stairwell (south-west corner) and of the
+                // interior wall that meets this side.
+                let (stair_end, m) = if along_x {
+                    (stair_x1(bl.x0) + 1.0, bl.xm)
+                } else {
+                    (stair_z1(bl.z0) + 1.0, bl.zm)
+                };
+                let lo = (u0 + T + 0.9).max(if side == 0 || side == 2 {
+                    stair_end
+                } else {
+                    f32::MIN
+                });
+                let hi = u1 - T - 0.9;
+                let Some(c) = (0..8)
+                    .map(|_| self.rng.range(lo, hi))
+                    .find(|&c| hi > lo && (c - m).abs() > 1.6)
+                else {
+                    continue;
+                };
+                let floors = 1 + self.rng.below(bl.floors.min(6));
+                let (x0, z0, x1, z1) = match side {
+                    0 => (u0, bl.z0 - depth, u1, bl.z0),
+                    1 => (u0, bl.z1, u1, bl.z1 + depth),
+                    2 => (bl.x0 - depth, u0, bl.x0, u1),
+                    _ => (bl.x1, u0, bl.x1 + depth, u1),
+                };
+                for k in 0..floors {
+                    bl.gaps.push(Gap {
+                        floor: k,
+                        side,
+                        opening: door_at(c),
+                    });
+                }
+                if bl.floors > floors {
+                    bl.gaps.push(Gap {
+                        floor: floors,
+                        side,
+                        opening: door_at(c),
+                    });
+                }
+                bl.wings.push(Wing {
+                    side,
+                    x0,
+                    z0,
+                    x1,
+                    z1,
+                    floors,
+                });
+                made += 1;
+            }
+        }
+    }
+
+    /// A wing: outer walls with windows on the three free edges (the x walls run full length, the z walls
+    /// between them or up to the core), a street door in the far wall, a slab per floor (the last one is its
+    /// roof, with a parapet).
+    fn wing(&mut self, w: &Wing, e: f32, wall: Mat, floor: Mat) {
+        // The edge against the core: 0 south, 1 north, 2 west, 3 east of the wing.
+        let attached = w.side ^ 1;
+        let far = w.side;
+        let (x0, z0, x1, z1) = (w.x0, w.z0, w.x1, w.z1);
+        let inset = |edge: u32| if edge == attached { 0.0 } else { T };
+        let (ix0, ix1) = (x0 + inset(2), x1 - inset(3));
+        let (iz0, iz1) = (z0 + inset(0), z1 - inset(1));
+        self.rooms.push(Aabb {
+            min: Vec3::new(ix0, e, iz0),
+            max: Vec3::new(ix1, e + w.floors as f32 * FH, iz1),
+        });
+        self.add(Vec3::new(ix0, e, iz0), Vec3::new(ix1, e + 0.05, iz1), floor);
+        let door_side = far;
+        for k in 0..=w.floors {
+            let y = e + k as f32 * FH;
+            let roof = k == w.floors;
+            let h = if roof { 1.0 } else { FH };
+            for edge in (0..4).filter(|&s| s != attached) {
+                let along_x = edge < 2;
+                let (u0, u1) = if along_x { (x0, x1) } else { (iz0, iz1) };
+                let v = [z0 + T / 2.0, z1 - T / 2.0, x0 + T / 2.0, x1 - T / 2.0][edge as usize];
+                let mut doors = Vec::new();
+                if k == 0 && edge == door_side && u1 - u0 > 4.0 {
+                    doors.push(door_at(self.rng.range(u0 + 1.5, u1 - 1.5)));
+                }
+                let ops = if roof {
+                    Vec::new()
+                } else {
+                    self.openings(u0, u1, doors)
+                };
+                self.wall(along_x, u0, u1, v, y, h, T, &ops, wall);
+            }
+            if !roof {
+                let top = y + FH;
+                self.add(
+                    Vec3::new(ix0, top - 0.2, iz0),
+                    Vec3::new(ix1, top, iz1),
+                    floor,
+                );
+            }
+        }
+    }
+
+    /// A random pit for the block at (`bx`, `bz`): a kind (shaft, crater or pit) for its size and depth, a
+    /// place in the block, a stair layout; the depth is cut to what the stairs along the walls can reach.
+    fn pit_plan(&mut self, bx: f32, bz: f32) -> PitPlan {
+        let roll = self.rng.unit();
+        let mut acc = 0.0;
+        let &(_, size, depth) = PIT_KINDS
+            .iter()
+            .find(|k| {
+                acc += k.0;
+                roll < acc
+            })
+            .unwrap_or(&PIT_KINDS[2]);
+        let max = BLOCK - 2.0 * PIT_MARGIN;
+        let (sx, sz) = (
+            self.rng.range(size.0, size.1).min(max),
+            self.rng.range(size.0, size.1).min(max),
+        );
+        let x0 = bx + self.rng.range(PIT_MARGIN, BLOCK - PIT_MARGIN - sx);
+        let z0 = bz + self.rng.range(PIT_MARGIN, BLOCK - PIT_MARGIN - sz);
+        let swap = self.rng.chance(0.5);
+        // Steps that fit along the walls: the first side from its corner, the others between landings.
+        let (lx, lz) = if swap { (sz, sx) } else { (sx, sz) };
+        let w = PIT_STAIR;
+        let fit = ((lx - w) / RUN).floor()
+            + ((lz - 2.0 * w) / RUN).floor()
+            + ((lx - 2.0 * w) / RUN).floor()
+            + ((lz - 2.0 * w) / RUN).floor()
+            - 2.0;
+        let d = (self.rng.range(depth.0, depth.1) / RISE).round().min(fit) * RISE;
+        PitPlan {
+            x0,
+            z0,
+            x1: x0 + sx,
+            z1: z0 + sz,
+            depth: d,
+            swap,
+            flip_x: self.rng.chance(0.5),
+            flip_z: self.rng.chance(0.5),
+        }
+    }
+
+    /// A pit dug into the block from the street, built in its local frame (see `PitPlan`): retaining walls
+    /// under the asphalt, a floor `depth` down, a flight of steps along the walls (from the local south-west
+    /// corner along the south wall, a landing in each corner, on along the next wall) with a railing on the
+    /// open side, a railing round the rim (open at the stairs' top), and on the floor a feature in each
+    /// quarter (pillars, a ruined corner, a platform, a two-tier mound, a pool, a boulder or nothing) and one
+    /// to four artifacts over the middle of some quarters (on top of a platform or mound).
+    fn pit(&mut self, p: &PitPlan) {
+        let (lx, lz) = if p.swap {
+            (p.z1 - p.z0, p.x1 - p.x0)
+        } else {
+            (p.x1 - p.x0, p.z1 - p.z0)
+        };
+        let to_world = |a: f32, b: f32, lo: f32, hi: f32, flip: bool| {
+            if flip {
+                (hi - b, hi - a)
+            } else {
+                (lo + a, lo + b)
+            }
+        };
+        // A local box to the world.
+        let put = |b: &mut Builder, min: Vec3, max: Vec3, mat: Mat| {
+            let (ax0, ax1, az0, az1) = if p.swap {
+                (min.z, max.z, min.x, max.x)
+            } else {
+                (min.x, max.x, min.z, max.z)
+            };
+            let (x0, x1) = to_world(ax0, ax1, p.x0, p.x1, p.flip_x);
+            let (z0, z1) = to_world(az0, az1, p.z0, p.z1, p.flip_z);
+            b.add(Vec3::new(x0, min.y, z0), Vec3::new(x1, max.y, z1), mat);
+        };
+        let (w, bottom) = (PIT_STAIR, -p.depth);
+        let v = Vec3::new;
+        // Walls under the 1 m asphalt (the south and north ones over the corners) and the floor.
+        let (wy0, wy1) = (bottom - 0.5, -1.0);
+        put(self, v(-1.0, wy0, -1.0), v(lx + 1.0, wy1, 0.0), Mat::Stone);
+        put(
+            self,
+            v(-1.0, wy0, lz),
+            v(lx + 1.0, wy1, lz + 1.0),
+            Mat::Stone,
+        );
+        put(self, v(-1.0, wy0, 0.0), v(0.0, wy1, lz), Mat::Stone);
+        put(self, v(lx, wy0, 0.0), v(lx + 1.0, wy1, lz), Mat::Stone);
+        put(
+            self,
+            v(0.0, bottom - 0.5, 0.0),
+            v(lx, bottom, lz),
+            Mat::Grass,
+        );
+        // Rim railing, open where the stairs start.
+        let (r, rh) = (0.08, 1.0);
+        put(self, v(w, 0.0, -r), v(lx + r, rh, 0.0), Mat::Metal);
+        put(self, v(-r, 0.0, lz), v(lx + r, rh, lz + r), Mat::Metal);
+        put(self, v(-r, 0.0, w), v(0.0, rh, lz), Mat::Metal);
+        put(self, v(lx, 0.0, 0.0), v(lx + r, rh, lz), Mat::Metal);
+
+        // A piece of the stair strip along side `s` (0 south, 1 east, 2 north, 3 west, counterclockwise
+        // from the south-west corner), from `ta` to `tb` m from the side's start corner, `a` to `c` m from
+        // the wall.
+        let piece = |b: &mut Builder,
+                     s: u32,
+                     (ta, tb): (f32, f32),
+                     (a, c): (f32, f32),
+                     (y0, y1): (f32, f32),
+                     mat: Mat| {
+            let (min, max) = match s {
+                0 => (v(ta, y0, a), v(tb, y1, c)),
+                1 => (v(lx - c, y0, ta), v(lx - a, y1, tb)),
+                2 => (v(lx - tb, y0, lz - c), v(lx - ta, y1, lz - a)),
+                _ => (v(a, y0, lz - tb), v(c, y1, lz - ta)),
+            };
+            put(b, min, max, mat);
+        };
+        let steps = (p.depth / RISE).round() as i32;
+        let (mut i, mut s, mut t) = (0, 0u32, 0.0f32);
+        while i < steps && s < 4 {
+            let len = if s % 2 == 0 { lx } else { lz };
+            let end = len - w;
+            while i < steps && t + RUN <= end + 1e-3 {
+                let top = -((i + 1) as f32) * RISE;
+                piece(self, s, (t, t + RUN), (0.0, w), (bottom, top), Mat::Stair);
+                // No railing on the last steps (under 0.75 m): the way off the stairs onto the floor.
+                if steps - i > 3 {
+                    piece(
+                        self,
+                        s,
+                        (t, t + RUN),
+                        (w - r, w),
+                        (top, top + rh),
+                        Mat::Metal,
+                    );
+                }
+                t += RUN;
+                i += 1;
+            }
+            if i >= steps {
+                break;
+            }
+            // Landing in the next corner, railed on the part beside the pit.
+            let top = -(i as f32) * RISE;
+            piece(self, s, (t, len), (0.0, w), (bottom, top), Mat::Stair);
+            piece(self, s, (t, end), (w - r, w), (top, top + rh), Mat::Metal);
+            s += 1;
+            t = w;
+        }
+
+        // The floor inside the stair strips in four quarters, each with a feature that keeps its middle free
+        // (a platform or mound fills it, the artifact floats on top).
+        let (fx0, fx1, fz0, fz1) = (w + 0.6, lx - w - 0.6, w + 0.6, lz - w - 0.6);
+        let (mx, mz) = ((fx0 + fx1) / 2.0, (fz0 + fz1) / 2.0);
+        let quarters = [
+            (fx0, mx, fz0, mz),
+            (mx, fx1, fz0, mz),
+            (fx0, mx, mz, fz1),
+            (mx, fx1, mz, fz1),
+        ];
+        let mut tops = [bottom; 4];
+        for (q, &(qx0, qx1, qz0, qz1)) in quarters.iter().enumerate() {
+            // 0.6 m clear on each side: walkways of 1.2 m between quarters and along the stairs.
+            let (qx0, qx1, qz0, qz1) = (qx0 + 0.6, qx1 - 0.6, qz0 + 0.6, qz1 - 0.6);
+            let (cx, cz) = ((qx0 + qx1) / 2.0, (qz0 + qz1) / 2.0);
+            let room = (qx1 - qx0).min(qz1 - qz0);
+            let feature = [
+                Feature::Empty,
+                Feature::Pillars,
+                Feature::Ruin,
+                Feature::Platform,
+                Feature::Mound,
+                Feature::Pool,
+                Feature::Boulder,
+            ][self.rng.below(7) as usize];
+            match feature {
+                Feature::Empty => {}
+                Feature::Pillars => {
+                    for (px, pz) in [(qx0, qz0), (qx1, qz0), (qx0, qz1), (qx1, qz1)] {
+                        if !self.rng.chance(0.6) {
+                            continue;
+                        }
+                        let half = self.rng.range(0.3, 0.45);
+                        let h = self.rng.range(2.0, 7.0);
+                        let (x, z) = (
+                            px + (cx - px).signum() * half,
+                            pz + (cz - pz).signum() * half,
+                        );
+                        put(
+                            self,
+                            v(x - half, bottom, z - half),
+                            v(x + half, bottom + h, z + half),
+                            Mat::Stone,
+                        );
+                    }
+                }
+                Feature::Ruin => {
+                    let (ha, hb) = (self.rng.range(1.2, 1.8), self.rng.range(2.0, 3.0));
+                    put(
+                        self,
+                        v(qx0, bottom, qz0),
+                        v(qx1, bottom + ha, qz0 + 0.4),
+                        Mat::Stone,
+                    );
+                    put(
+                        self,
+                        v(qx0, bottom, qz0 + 0.4),
+                        v(qx0 + 0.4, bottom + hb, qz1),
+                        Mat::Stone,
+                    );
+                }
+                Feature::Platform | Feature::Mound => {
+                    let half = (room / 2.0 - 0.2).min(1.6);
+                    put(
+                        self,
+                        v(cx - half, bottom, cz - half),
+                        v(cx + half, bottom + 0.5, cz + half),
+                        Mat::Stair,
+                    );
+                    tops[q] = bottom + 0.5;
+                    if matches!(feature, Feature::Mound) && half > 1.0 {
+                        let h2 = half * 0.55;
+                        put(
+                            self,
+                            v(cx - h2, bottom + 0.5, cz - h2),
+                            v(cx + h2, bottom + 1.0, cz + h2),
+                            Mat::Stone,
+                        );
+                        tops[q] = bottom + 1.0;
+                    }
+                }
+                Feature::Pool => {
+                    let half = (room / 2.0 - 0.2).min(1.8);
+                    put(
+                        self,
+                        v(cx - half, bottom, cz - half),
+                        v(cx + half, bottom + 0.06, cz + half),
+                        Mat::Water,
+                    );
+                    tops[q] = bottom + 0.06;
+                }
+                Feature::Boulder => {
+                    let size = self.rng.range(0.8, 1.4).min(room / 2.0);
+                    let h = self.rng.range(0.6, 1.5);
+                    let (x, z) = if self.rng.chance(0.5) {
+                        (qx0, qz1 - size)
+                    } else {
+                        (qx1 - size, qz0)
+                    };
+                    put(
+                        self,
+                        v(x, bottom, z),
+                        v(x + size, bottom + h, z + size),
+                        Mat::Stone,
+                    );
+                }
+            }
+        }
+        // One to four artifacts, each over the middle of its own quarter.
+        let mut order = [0usize, 1, 2, 3];
+        for k in (1..4).rev() {
+            let j = self.rng.below(k as u32 + 1) as usize;
+            order.swap(k, j);
+        }
+        let n = 1 + self.rng.below(4) as usize;
+        for &q in &order[..n] {
+            let (qx0, qx1, qz0, qz1) = quarters[q];
+            let c = v((qx0 + qx1) / 2.0, tops[q] + 1.1, (qz0 + qz1) / 2.0);
+            self.artifacts.push(p.world(c));
+        }
+    }
+
     /// Raised block: a stone terrace with a flight of steps from the street on its south and north sides.
     fn terrace(&mut self, block: &Block) {
         let (x0, z0, e) = (block.x0, block.z0, block.e);
@@ -1237,6 +1823,9 @@ impl Builder {
     /// flight k has its hole over that lane only; flights never stack inside one another's head room.
     /// Floor slabs stop at the inner face of the outer walls, so no faces overlap.
     fn building(&mut self, bl: &Building, e: f32) {
+        for w in &bl.wings {
+            self.wing(w, e, bl.wall, bl.floor);
+        }
         let (x0, z0, x1, z1) = (bl.x0, bl.z0, bl.x1, bl.z1);
         let steps = (FH / RISE) as i32;
         let (sx0, sx1) = (stair_x0(x0), stair_x1(x0));
@@ -1650,6 +2239,7 @@ pub(crate) fn test_building(floors: u32) -> Vec<Aabb> {
         props: Vec::new(),
         spots: Vec::new(),
         rooms: Vec::new(),
+        artifacts: Vec::new(),
     };
     b.add(
         Vec3::new(-20.0, -1.0, -20.0),
@@ -1667,9 +2257,75 @@ pub(crate) fn test_building(floors: u32) -> Vec<Aabb> {
         xm: stair_x1(0.0) + 2.5,
         zm: stair_z1(0.0) + 3.5,
         gaps: Vec::new(),
+        wings: Vec::new(),
     };
     b.building(&bl, 0.0);
     b.parts.into_iter().map(|(a, _)| a).collect()
+}
+
+/// Boxes of a chunk ground with one pit of `depth` in the block at the origin, and the hole (x0, z0, x1, z1).
+#[cfg(test)]
+pub(crate) fn test_pit(depth: f32) -> (Vec<Aabb>, (f32, f32, f32, f32)) {
+    let mut b = Builder {
+        rng: Rng(5),
+        parts: Vec::new(),
+        props: Vec::new(),
+        spots: Vec::new(),
+        rooms: Vec::new(),
+        artifacts: Vec::new(),
+    };
+    let w = BLOCK - PIT_MARGIN;
+    let plan = PitPlan {
+        x0: PIT_MARGIN,
+        z0: PIT_MARGIN,
+        x1: w,
+        z1: w,
+        depth,
+        swap: false,
+        flip_x: false,
+        flip_z: false,
+    };
+    let block = Block {
+        x0: 0.0,
+        z0: 0.0,
+        e: 0.0,
+        kind: Kind::Pit(plan),
+    };
+    b.ground(Vec2::splat(-STREET / 2.0), std::slice::from_ref(&block));
+    b.pit(&plan);
+    (
+        b.parts.into_iter().map(|(a, _)| a).collect(),
+        (PIT_MARGIN, PIT_MARGIN, w, w),
+    )
+}
+
+/// A random pit (seed) in the block at the origin: its boxes, a point on the street in front of its stairs'
+/// top, and its artifacts.
+#[cfg(test)]
+pub(crate) fn test_random_pit(seed: u64) -> (Vec<Aabb>, Vec3, Vec<Vec3>) {
+    let mut b = Builder {
+        rng: Rng(seed),
+        parts: Vec::new(),
+        props: Vec::new(),
+        spots: Vec::new(),
+        rooms: Vec::new(),
+        artifacts: Vec::new(),
+    };
+    let plan = b.pit_plan(0.0, 0.0);
+    let block = Block {
+        x0: 0.0,
+        z0: 0.0,
+        e: 0.0,
+        kind: Kind::Pit(plan),
+    };
+    b.ground(Vec2::splat(-STREET / 2.0), std::slice::from_ref(&block));
+    b.pit(&plan);
+    let start = plan.world(Vec3::new(PIT_STAIR / 2.0, 0.0, -0.6));
+    (
+        b.parts.into_iter().map(|(a, _)| a).collect(),
+        start,
+        b.artifacts,
+    )
 }
 
 /// Boxes of one terrace block at height `e` (no content) and its south flight of steps, lowest step first.
@@ -1681,6 +2337,7 @@ pub(crate) fn test_terrace(e: f32) -> (Vec<Aabb>, Vec<Aabb>) {
         props: Vec::new(),
         spots: Vec::new(),
         rooms: Vec::new(),
+        artifacts: Vec::new(),
     };
     b.add(
         Vec3::new(-20.0, -1.0, -20.0),
@@ -1728,7 +2385,7 @@ mod tests {
     fn watcher_escapes_are_clear() {
         let mut kept = 0;
         for s in 0..20u64 {
-            let (parts, _, spots, _) = generate(s * 104_729 + 3, IVec2::new(s as i32, 1));
+            let (parts, _, spots, _, _) = generate(s * 104_729 + 3, IVec2::new(s as i32, 1));
             assert!(spots.iter().all(|spot| {
                 !spot.escapes.is_empty()
                     && spot
@@ -1741,10 +2398,49 @@ mod tests {
         assert!(kept > 20 * 10, "only {kept} spots in 20 chunks");
     }
 
+    /// Over many chunks there are pits with artifacts and buildings with wings.
+    #[test]
+    fn pits_and_wings_appear() {
+        let (mut artifacts, mut wings) = (0, 0);
+        for s in 0..40u64 {
+            let mut b = Builder {
+                rng: Rng(s * 31 + 7),
+                parts: Vec::new(),
+                props: Vec::new(),
+                spots: Vec::new(),
+                rooms: Vec::new(),
+                artifacts: Vec::new(),
+            };
+            let theme = Theme {
+                building: 0.6,
+                plaza: 0.2,
+                floors: (1, 4),
+                peak: 2.0,
+                hills: 1,
+                connect: 0.5,
+                tower: 0.1,
+                pit: 0.3,
+            };
+            let mut blocks = b.plan(IVec2::new(s as i32, 0), &theme);
+            b.connect(&mut blocks, &theme);
+            b.wings(&mut blocks);
+            wings += blocks
+                .iter()
+                .map(|bl| match &bl.kind {
+                    Kind::Building(x) => x.wings.len(),
+                    _ => 0,
+                })
+                .sum::<usize>();
+            artifacts += generate(s * 13 + 1, IVec2::new(0, s as i32)).4.len();
+        }
+        assert!(artifacts > 5, "only {artifacts} artifacts in 40 chunks");
+        assert!(wings > 10, "only {wings} wings in 40 chunks");
+    }
+
     #[test]
     fn no_coplanar_visible_faces() {
-        for s in 0..20u64 {
-            let (parts, _, _, _) = generate(s * 7919 + 1, IVec2::new(0, s as i32));
+        for s in 0..60u64 {
+            let (parts, _, _, _, _) = generate(s * 7919 + 1, IVec2::new(0, s as i32));
             let boxes: Vec<Aabb> = parts.iter().map(|(a, _)| *a).collect();
             let covered = |c: Vec3| {
                 boxes

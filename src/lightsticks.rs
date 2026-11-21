@@ -1,4 +1,4 @@
-//! Light sticks: T throws a glowing stick along the view (a little upward); it flies under gravity, bounces
+//! Light sticks: 4 throws a glowing stick along the view (a little upward); it flies under gravity, bounces
 //! off walls, comes to rest on the first floor it hits and lights the area around it in green for
 //! `LIFE` seconds (fading over the last `FADE`). At most `MAX` lie around; the oldest goes first.
 
@@ -21,11 +21,11 @@ impl Plugin for LightSticksPlugin {
 const SPEED: f32 = 13.0;
 const UP: f32 = 3.0;
 const GRAVITY: f32 = 18.0;
-const LIFE: f32 = 120.0;
+const LIFE: f32 = 300.0;
 const FADE: f32 = 10.0;
 const MAX: usize = 10;
-const LUMENS: f32 = 30_000.0;
-const RANGE: f32 = 9.0;
+const LUMENS: f32 = 120_000.0;
+const RANGE: f32 = 18.0;
 const LENGTH: f32 = 0.16;
 
 #[derive(Resource)]
@@ -66,7 +66,7 @@ fn throw(
     mut sound: ResMut<SoundQueue>,
 ) {
     let (camera, player) = *camera;
-    if !keys.just_pressed(KeyCode::KeyT) || player.dead {
+    if !keys.just_pressed(KeyCode::Digit4) || player.dead {
         return;
     }
     // Over the limit: the oldest goes.
